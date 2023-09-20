@@ -1,0 +1,16 @@
+# Glyph
+_build/
+_opam/
+*.install
+*.byte
+*.native
+*.gbc
+.merlin
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+*.log
+.coverage/
+*.cover
