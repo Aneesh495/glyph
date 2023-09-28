@@ -1,0 +1,15 @@
+type List a = Nil | Cons a (List a)
+
+let rec map f xs =
+  match xs with
+  | Nil -> Nil
+  | Cons x rest -> Cons (f x) (map f rest)
+
+let rec sum xs =
+  match xs with
+  | Nil -> 0
+  | Cons x rest -> x + sum rest
+
+let nums = Cons 1 (Cons 2 (Cons 3 (Cons 4 Nil)))
+
+let main = print_int (sum (map (fun x -> x * x) nums))

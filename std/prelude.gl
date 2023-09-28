@@ -1,0 +1,61 @@
+(* Glyph prelude — loaded before user programs. *)
+
+type Option a = None | Some a
+
+type List a = Nil | Cons a (List a)
+
+type Result a e = Ok a | Err e
+
+let id x = x
+
+let const x y = x
+
+let not b = if b then false else true
+
+let rec map f xs =
+  match xs with
+  | Nil -> Nil
+  | Cons x rest -> Cons (f x) (map f rest)
+
+let rec filter p xs =
+  match xs with
+  | Nil -> Nil
+  | Cons x rest ->
+      if p x then Cons x (filter p rest) else filter p rest
+
+let rec foldl f acc xs =
+  match xs with
+  | Nil -> acc
+  | Cons x rest -> foldl f (f acc x) rest
+
+let rec foldr f acc xs =
+  match xs with
+  | Nil -> acc
+  | Cons x rest -> f x (foldr f acc rest)
+
+let rec length xs =
+  match xs with
+  | Nil -> 0
+  | Cons _ rest -> 1 + length rest
+
+let rec append xs ys =
+  match xs with
+  | Nil -> ys
+  | Cons x rest -> Cons x (append rest ys)
+
+let rec rev_append xs acc =
+  match xs with
+  | Nil -> acc
+  | Cons x rest -> rev_append rest (Cons x acc)
+
+let reverse xs = rev_append xs Nil
+
+let option_map f o =
+  match o with
+  | None -> None
+  | Some x -> Some (f x)
+
+let option_unwrap o default =
+  match o with
+  | None -> default
+  | Some x -> x

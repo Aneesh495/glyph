@@ -2,17 +2,6 @@
 
 type id = int
 
-type t = {
-  mutable by_string : (string, id) Hashtbl.t;
-  mutable by_id : string Resizable.t;
-}
-
-and 'a resizable = {
-  mutable data : 'a array;
-  mutable len : int;
-}
-
-(* Avoid circular naming — inline growable string array. *)
 module Strings = struct
   type t = {
     mutable data : string array;
@@ -40,7 +29,7 @@ module Strings = struct
   let to_array a = Array.sub a.data 0 a.len
 end
 
-type nonrec t = {
+type t = {
   by_string : (string, id) Hashtbl.t;
   strings : Strings.t;
 }
@@ -68,7 +57,6 @@ let of_id t id =
   Strings.get t.strings id
 
 let mem t s = Hashtbl.mem t.by_string s
-
 let find_opt t s = Hashtbl.find_opt t.by_string s
 
 let iter t f =
