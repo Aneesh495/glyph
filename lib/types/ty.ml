@@ -12,7 +12,7 @@ type level = int
 type tvar = {
   id : int;
   mutable level : level;
-  name : string option;
+  mutable name : string option;
   mutable link : ty option;
 }
 
