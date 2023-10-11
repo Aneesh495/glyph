@@ -1,62 +1,52 @@
-(** Hand-written lexer for Glyph source text. *)
+(** Hand-written lexer producing spanned tokens. *)
 
-type t = {
-  filename : string;
-  source : string;
-  length : int;
-  mutable pos : Span.pos;
-  mutable diagnostics : Diagnostic.t list;
-  skip_comments : bool;
+type error = {
+  message : string;
+  span : Span.t;
 }
 
-let create ?(skip_comments = true) ~filename ~source () =
-  {
-    filename;
-    source;
-    length = String.length source;
-    pos = Span.dummy_pos;
-    diagnostics = [];
-    skip_comments;
-  }
+exception Error of error
 
-let diagnostics lex = List.rev lex.diagnostics
+type t = {
+  file : string;
+  source : string;
+  mutable pos : Span.pos;
+  mutable peeked : Token.t option;
+}
 
-let add_error lex span message =
-  lex.diagnostics <- Diagnostic.error span message :: lex.diagnostics
+let create ?(file = "<input>") source =
+  { file; source; pos = { line = 1; col = 1; offset = 0 }; peeked = None }
 
-let peek lex =
-  if lex.pos.offset >= lex.length then None else Some lex.source.[lex.pos.offset]
+let file t = t.file
+let source t = t.source
+let position t = t.pos
 
-let peek_at lex n =
-  let i = lex.pos.offset + n in
-  if i >= lex.length then None else Some lex.source.[i]
+let length t = String.length t.source
 
-let advance lex =
-  match peek lex with
+let at_end t = t.pos.offset >= length t
+
+let peek_char t =
+  if at_end t then None else Some t.source.[t.pos.offset]
+
+let peek_char_n t n =
+  let i = t.pos.offset + n in
+  if i >= length t then None else Some t.source.[i]
+
+let advance t =
+  match peek_char t with
   | None -> ()
-  | Some ch -> lex.pos <- Span.advance_pos lex.pos ~ch
+  | Some ch -> t.pos <- Span.advance_pos t.pos ~ch
 
-let advance_n lex n =
-  for _ = 1 to n do
-    advance lex
-  done
-
-let starts_with lex s =
-  let n = String.length s in
-  if lex.pos.offset + n > lex.length then false
-  else
-    let rec loop i =
-      if i >= n then true
-      else if lex.source.[lex.pos.offset + i] <> s.[i] then false
-      else loop (i + 1)
-    in
-    loop 0
-
-let is_whitespace = function
-  | ' ' | '\t' | '\n' | '\r' -> true
+let match_char t ch =
+  match peek_char t with
+  | Some c when c = ch ->
+      advance t;
+      true
   | _ -> false
 
-let is_digit = function '0' .. '9' -> true | _ -> false
+let fail t msg =
+  let span = Span.make ~file:t.file ~start:t.pos ~end_:t.pos in
+  raise (Error { message = msg; span })
 
 let is_ident_start = function
   | 'a' .. 'z' | 'A' .. 'Z' | '_' -> true
@@ -66,421 +56,328 @@ let is_ident_continue = function
   | 'a' .. 'z' | 'A' .. 'Z' | '0' .. '9' | '_' | '\'' -> true
   | _ -> false
 
-let is_hex_digit = function
-  | '0' .. '9' | 'a' .. 'f' | 'A' .. 'F' -> true
+let is_digit = function
+  | '0' .. '9' -> true
   | _ -> false
 
-let skip_whitespace lex =
+let is_whitespace = function
+  | ' ' | '\t' | '\r' | '\n' -> true
+  | _ -> false
+
+let skip_line_comment t =
+  while
+    match peek_char t with
+    | Some '\n' | None -> false
+    | Some _ -> true
+  do
+    advance t
+  done
+
+let skip_block_comment t =
+  let start = t.pos in
+  (* consume opening '*' already seen after '/' *)
+  let depth = ref 1 in
+  while !depth > 0 do
+    match peek_char t with
+    | None ->
+        let span = Span.make ~file:t.file ~start ~end_:t.pos in
+        raise (Error { message = "unterminated block comment"; span })
+    | Some '/' when peek_char_n t 1 = Some '*' ->
+        advance t;
+        advance t;
+        incr depth
+    | Some '*' when peek_char_n t 1 = Some '/' ->
+        advance t;
+        advance t;
+        decr depth
+    | Some _ -> advance t
+  done
+
+let skip_trivia t =
   let rec loop () =
-    match peek lex with
+    match peek_char t with
     | Some ch when is_whitespace ch ->
-        advance lex;
+        advance t;
+        loop ()
+    | Some '/' when peek_char_n t 1 = Some '/' ->
+        advance t;
+        advance t;
+        skip_line_comment t;
+        loop ()
+    | Some '/' when peek_char_n t 1 = Some '*' ->
+        advance t;
+        advance t;
+        skip_block_comment t;
         loop ()
     | _ -> ()
   in
   loop ()
 
-let make_token lex kind start raw =
-  let span = Span.make ~file:lex.filename ~start ~end_:lex.pos in
-  Token.make kind span raw
+let emit t kind ~start ~lexeme =
+  let span = Span.make ~file:t.file ~start ~end_:t.pos in
+  Token.make kind ~span ~lexeme
 
-let slice_raw lex start =
-  let len = lex.pos.offset - start.Span.offset in
-  if len <= 0 then ""
-  else String.sub lex.source start.offset len
-
-(** Consume a line comment starting at [//]. *)
-let lex_line_comment lex start =
+let read_while t pred =
+  let start = t.pos.offset in
   while
-    match peek lex with
-    | Some '\n' | None -> false
-    | Some _ -> true
+    match peek_char t with
+    | Some ch when pred ch ->
+        advance t;
+        true
+    | _ -> false
   do
-    advance lex
+    ()
   done;
-  let raw = slice_raw lex start in
-  let body =
-    if String.length raw >= 2 then String.sub raw 2 (String.length raw - 2)
-    else ""
-  in
-  make_token lex (Token.Comment body) start raw
+  String.sub t.source start (t.pos.offset - start)
 
-(** Consume a nested block comment starting at [/*]. *)
-let lex_block_comment lex start =
-  advance_n lex 2;
-  (* skip opening /* *)
-  let depth = ref 1 in
-  let unterminated = ref false in
-  while !depth > 0 do
-    match peek lex with
-    | None ->
-        unterminated := true;
-        depth := 0
-    | Some '/' when peek_at lex 1 = Some '*' ->
-        advance_n lex 2;
-        incr depth
-    | Some '*' when peek_at lex 1 = Some '/' ->
-        advance_n lex 2;
-        decr depth
-    | Some _ -> advance lex
-  done;
-  let raw = slice_raw lex start in
-  if !unterminated then (
-    let span = Span.make ~file:lex.filename ~start ~end_:lex.pos in
-    add_error lex span "unterminated block comment";
-    make_token lex (Token.Error "unterminated block comment") start raw)
-  else
-    let body =
-      let n = String.length raw in
-      if n >= 4 then String.sub raw 2 (n - 4) else ""
-    in
-    make_token lex (Token.Comment body) start raw
+let decode_escape t =
+  match peek_char t with
+  | None -> fail t "unterminated escape sequence"
+  | Some 'n' ->
+      advance t;
+      '\n'
+  | Some 't' ->
+      advance t;
+      '\t'
+  | Some 'r' ->
+      advance t;
+      '\r'
+  | Some '\\' ->
+      advance t;
+      '\\'
+  | Some '"' ->
+      advance t;
+      '"'
+  | Some '\'' ->
+      advance t;
+      '\''
+  | Some '0' ->
+      advance t;
+      '\000'
+  | Some ch ->
+      advance t;
+      ch
 
-let decode_hex_escape lex ~digits =
-  let buf = Buffer.create digits in
-  let rec loop i =
-    if i >= digits then Ok (Buffer.contents buf)
-    else
-      match peek lex with
-      | Some ch when is_hex_digit ch ->
-          Buffer.add_char buf ch;
-          advance lex;
-          loop (i + 1)
-      | _ -> Error "invalid hex escape"
-  in
-  match loop 0 with
-  | Error e -> Error e
-  | Ok hex -> (
-      try Ok (Char.chr (int_of_string ("0x" ^ hex)))
-      with Failure _ -> Error "hex escape out of range")
-
-let lex_string_escapes lex start quote =
-  advance lex;
+let read_string t =
+  let start = t.pos in
+  advance t;
   (* opening quote *)
   let buf = Buffer.create 32 in
-  let error_msg = ref None in
-  let finished = ref false in
-  while not !finished do
-    match peek lex with
+  let rec loop () =
+    match peek_char t with
     | None ->
-        error_msg := Some "unterminated string literal";
-        finished := true
-    | Some ch when ch = quote ->
-        advance lex;
-        finished := true
-    | Some '\\' -> (
-        advance lex;
-        match peek lex with
-        | None ->
-            error_msg := Some "unterminated string escape";
-            finished := true
-        | Some 'n' ->
-            Buffer.add_char buf '\n';
-            advance lex
-        | Some 't' ->
-            Buffer.add_char buf '\t';
-            advance lex
-        | Some 'r' ->
-            Buffer.add_char buf '\r';
-            advance lex
-        | Some '\\' ->
-            Buffer.add_char buf '\\';
-            advance lex
-        | Some '\'' ->
-            Buffer.add_char buf '\'';
-            advance lex
-        | Some '"' ->
-            Buffer.add_char buf '"';
-            advance lex
-        | Some '0' ->
-            Buffer.add_char buf '\000';
-            advance lex
-        | Some 'x' -> (
-            advance lex;
-            match decode_hex_escape lex ~digits:2 with
-            | Ok c -> Buffer.add_char buf c
-            | Error msg ->
-                error_msg := Some msg;
-                finished := true)
-        | Some 'u' when peek_at lex 1 = Some '{' -> (
-            advance_n lex 2;
-            let hex = Buffer.create 6 in
-            let ok = ref true in
-            while !ok do
-              match peek lex with
-              | Some '}' ->
-                  advance lex;
-                  ok := false
-              | Some ch when is_hex_digit ch ->
-                  Buffer.add_char hex ch;
-                  advance lex
-              | _ ->
-                  error_msg := Some "invalid unicode escape";
-                  ok := false;
-                  finished := true
-            done;
-            if !error_msg = None then
-              try
-                let code = int_of_string ("0x" ^ Buffer.contents hex) in
-                if code < 0 || code > 0x10FFFF then
-                  error_msg := Some "unicode escape out of range"
-                else if code <= 0xFF then Buffer.add_char buf (Char.chr code)
-                else
-                  (* Encode as UTF-8 bytes into the string buffer. *)
-                  let encode cp =
-                    if cp <= 0x7F then Buffer.add_char buf (Char.chr cp)
-                    else if cp <= 0x7FF then (
-                      Buffer.add_char buf
-                        (Char.chr (0xC0 lor (cp lsr 6)));
-                      Buffer.add_char buf
-                        (Char.chr (0x80 lor (cp land 0x3F))))
-                    else if cp <= 0xFFFF then (
-                      Buffer.add_char buf
-                        (Char.chr (0xE0 lor (cp lsr 12)));
-                      Buffer.add_char buf
-                        (Char.chr (0x80 lor ((cp lsr 6) land 0x3F)));
-                      Buffer.add_char buf
-                        (Char.chr (0x80 lor (cp land 0x3F))))
-                    else (
-                      Buffer.add_char buf
-                        (Char.chr (0xF0 lor (cp lsr 18)));
-                      Buffer.add_char buf
-                        (Char.chr (0x80 lor ((cp lsr 12) land 0x3F)));
-                      Buffer.add_char buf
-                        (Char.chr (0x80 lor ((cp lsr 6) land 0x3F)));
-                      Buffer.add_char buf
-                        (Char.chr (0x80 lor (cp land 0x3F))))
-                  in
-                  encode code
-              with Failure _ -> error_msg := Some "invalid unicode escape")
-        | Some c ->
-            Buffer.add_char buf c;
-            advance lex)
-    | Some '\n' ->
-        error_msg := Some "newline in string literal";
-        finished := true
+        let span = Span.make ~file:t.file ~start ~end_:t.pos in
+        raise (Error { message = "unterminated string literal"; span })
+    | Some '"' ->
+        advance t;
+        Buffer.contents buf
+    | Some '\\' ->
+        advance t;
+        Buffer.add_char buf (decode_escape t);
+        loop ()
+    | Some ch ->
+        advance t;
+        Buffer.add_char buf ch;
+        loop ()
+  in
+  let value = loop () in
+  let lexeme = String.sub t.source start.offset (t.pos.offset - start.offset) in
+  emit t (Token.String value) ~start ~lexeme
+
+let read_char t =
+  let start = t.pos in
+  advance t;
+  let ch =
+    match peek_char t with
+    | None -> fail t "unterminated character literal"
+    | Some '\\' ->
+        advance t;
+        decode_escape t
     | Some c ->
-        Buffer.add_char buf c;
-        advance lex
-  done;
-  let raw = slice_raw lex start in
-  match !error_msg with
-  | Some msg ->
-      let span = Span.make ~file:lex.filename ~start ~end_:lex.pos in
-      add_error lex span msg;
-      make_token lex (Token.Error msg) start raw
-  | None ->
-      let value = Buffer.contents buf in
-      if quote = '\'' then
-        if String.length value = 1 then
-          make_token lex (Token.Lit_char value.[0]) start raw
-        else if String.length value = 0 then (
-          let span = Span.make ~file:lex.filename ~start ~end_:lex.pos in
-          add_error lex span "empty character literal";
-          make_token lex (Token.Error "empty character literal") start raw)
-        else (
-          let span = Span.make ~file:lex.filename ~start ~end_:lex.pos in
-          add_error lex span "character literal must contain exactly one character";
-          make_token lex
-            (Token.Error "character literal must contain exactly one character")
-            start raw)
-      else make_token lex (Token.Lit_string value) start raw
+        advance t;
+        c
+  in
+  (match peek_char t with
+  | Some '\'' -> advance t
+  | _ -> fail t "expected closing quote for character literal");
+  let lexeme = String.sub t.source start.offset (t.pos.offset - start.offset) in
+  emit t (Token.Char ch) ~start ~lexeme
 
-let lex_number lex start =
-  let is_float = ref false in
-  (* integer part *)
-  while match peek lex with Some ch when is_digit ch -> true | _ -> false do
-    advance lex
-  done;
-  (* optional fractional part *)
-  (match (peek lex, peek_at lex 1) with
-  | Some '.', Some ch when is_digit ch ->
-      is_float := true;
-      advance lex;
-      while match peek lex with Some d when is_digit d -> true | _ -> false do
-        advance lex
-      done
-  | _ -> ());
-  (* optional exponent *)
-  (match peek lex with
+let read_number t =
+  let start = t.pos in
+  let int_part = read_while t is_digit in
+  match peek_char t with
+  | Some '.' when match peek_char_n t 1 with Some c -> is_digit c | None -> false
+    ->
+      advance t;
+      let frac = read_while t is_digit in
+      let lexeme =
+        String.sub t.source start.offset (t.pos.offset - start.offset)
+      in
+      let value = float_of_string (int_part ^ "." ^ frac) in
+      emit t (Token.Float value) ~start ~lexeme
   | Some ('e' | 'E') ->
-      is_float := true;
-      advance lex;
-      (match peek lex with
-      | Some ('+' | '-') -> advance lex
+      advance t;
+      (match peek_char t with
+      | Some ('+' | '-') -> advance t
       | _ -> ());
-      let had_digit = ref false in
-      while match peek lex with Some d when is_digit d -> true | _ -> false do
-        had_digit := true;
-        advance lex
-      done;
-      if not !had_digit then
-        let span = Span.make ~file:lex.filename ~start ~end_:lex.pos in
-        add_error lex span "exponent has no digits"
-  | _ -> ());
-  (* reject identifier continuation glued to number *)
-  (match peek lex with
-  | Some ch when is_ident_start ch ->
-      let span_start = lex.pos in
-      while
-        match peek lex with Some c when is_ident_continue c -> true | _ -> false
-      do
-        advance lex
-      done;
-      let span = Span.make ~file:lex.filename ~start:span_start ~end_:lex.pos in
-      add_error lex span "invalid numeric literal suffix"
-  | _ -> ());
-  let raw = slice_raw lex start in
-  if !is_float then make_token lex (Token.Lit_float raw) start raw
-  else make_token lex (Token.Lit_int raw) start raw
+      ignore (read_while t is_digit);
+      let lexeme =
+        String.sub t.source start.offset (t.pos.offset - start.offset)
+      in
+      let value = float_of_string lexeme in
+      emit t (Token.Float value) ~start ~lexeme
+  | _ ->
+      let lexeme = int_part in
+      let value =
+        try Int64.of_string lexeme
+        with Failure _ -> fail t ("integer literal out of range: " ^ lexeme)
+      in
+      emit t (Token.Int value) ~start ~lexeme
 
-let lex_ident lex start =
-  while
-    match peek lex with Some ch when is_ident_continue ch -> true | _ -> false
-  do
-    advance lex
-  done;
-  let raw = slice_raw lex start in
-  if raw = "_" then make_token lex (Token.Punct Token.Underscore) start raw
+let read_ident t =
+  let start = t.pos in
+  let name = read_while t is_ident_continue in
+  let lexeme = name in
+  if name = "_" then emit t Token.Underscore ~start ~lexeme
   else
-    let kind = Token.keyword_of_ident raw in
-    make_token lex kind start raw
+    match Token.keyword_of_string name with
+    | Some kw -> emit t (Token.Keyword kw) ~start ~lexeme
+    | None ->
+        let kind =
+          if name <> "" && (name.[0] >= 'A' && name.[0] <= 'Z') then
+            Token.Ctor name
+          else Token.Ident name
+        in
+        emit t kind ~start ~lexeme
 
-(** Longest-match operator / punctuation scan. *)
-let lex_operator lex start =
-  let buf = Buffer.create 4 in
-  while
-    match peek lex with Some ch when Token.is_op_char ch -> true | _ -> false
-  do
-    Buffer.add_char buf (Option.get (peek lex));
-    advance lex
-  done;
-  let raw = Buffer.contents buf in
-  (* Prefer longest known punctuation; fall back to Operator. *)
-  let rec try_split s =
-    if s = "" then None
-    else
-      match Token.classify_operator s with
-      | Token.Punct _ as kind -> Some (kind, s)
-      | Token.Operator _ when String.length s > 1 ->
-          try_split (String.sub s 0 (String.length s - 1))
-      | Token.Operator _ as kind -> Some (kind, s)
-      | _ -> None
+let read_operator t =
+  let start = t.pos in
+  let two =
+    match (peek_char t, peek_char_n t 1) with
+    | Some '=', Some '=' -> Some (Token.Binop Token.Op_eq, 2)
+    | Some '!', Some '=' -> Some (Token.Binop Token.Op_neq, 2)
+    | Some '<', Some '=' -> Some (Token.Binop Token.Op_le, 2)
+    | Some '>', Some '=' -> Some (Token.Binop Token.Op_ge, 2)
+    | Some '&', Some '&' -> Some (Token.Binop Token.Op_and, 2)
+    | Some '|', Some '|' -> Some (Token.Binop Token.Op_or, 2)
+    | Some ':', Some ':' -> Some (Token.Binop Token.Op_cons, 2)
+    | Some '|', Some '>' -> Some (Token.Binop Token.Op_pipe, 2)
+    | Some '-', Some '>' -> Some (Token.Arrow, 2)
+    | Some '=', Some '>' -> Some (Token.FatArrow, 2)
+    | _ -> None
   in
-  match try_split raw with
+  match two with
+  | Some (kind, n) ->
+      for _ = 1 to n do
+        advance t
+      done;
+      let lexeme =
+        String.sub t.source start.offset (t.pos.offset - start.offset)
+      in
+      emit t kind ~start ~lexeme
+  | None -> (
+      match peek_char t with
+      | Some '+' ->
+          advance t;
+          emit t (Token.Binop Token.Op_add) ~start ~lexeme:"+"
+      | Some '-' ->
+          advance t;
+          emit t (Token.Binop Token.Op_sub) ~start ~lexeme:"-"
+      | Some '*' ->
+          advance t;
+          emit t (Token.Binop Token.Op_mul) ~start ~lexeme:"*"
+      | Some '/' ->
+          advance t;
+          emit t (Token.Binop Token.Op_div) ~start ~lexeme:"/"
+      | Some '%' ->
+          advance t;
+          emit t (Token.Binop Token.Op_mod) ~start ~lexeme:"%"
+      | Some '<' ->
+          advance t;
+          emit t (Token.Binop Token.Op_lt) ~start ~lexeme:"<"
+      | Some '>' ->
+          advance t;
+          emit t (Token.Binop Token.Op_gt) ~start ~lexeme:">"
+      | Some '=' ->
+          advance t;
+          emit t Token.Equal ~start ~lexeme:"="
+      | Some '|' ->
+          advance t;
+          emit t Token.Pipe ~start ~lexeme:"|"
+      | Some ':' ->
+          advance t;
+          emit t Token.Colon ~start ~lexeme:":"
+      | Some ch -> fail t (Printf.sprintf "unexpected character %C" ch)
+      | None -> fail t "unexpected end of input")
+
+let next_token t =
+  skip_trivia t;
+  let start = t.pos in
+  match peek_char t with
+  | None -> emit t Token.Eof ~start ~lexeme:""
+  | Some '(' ->
+      advance t;
+      emit t Token.LParen ~start ~lexeme:"("
+  | Some ')' ->
+      advance t;
+      emit t Token.RParen ~start ~lexeme:")"
+  | Some '[' ->
+      advance t;
+      emit t Token.LBracket ~start ~lexeme:"["
+  | Some ']' ->
+      advance t;
+      emit t Token.RBracket ~start ~lexeme:"]"
+  | Some '{' ->
+      advance t;
+      emit t Token.LBrace ~start ~lexeme:"{"
+  | Some '}' ->
+      advance t;
+      emit t Token.RBrace ~start ~lexeme:"}"
+  | Some ',' ->
+      advance t;
+      emit t Token.Comma ~start ~lexeme:","
+  | Some '.' ->
+      advance t;
+      emit t Token.Dot ~start ~lexeme:"."
+  | Some ';' ->
+      advance t;
+      emit t Token.Semicolon ~start ~lexeme:";"
+  | Some '"' -> read_string t
+  | Some '\'' -> read_char t
+  | Some ch when is_digit ch -> read_number t
+  | Some ch when is_ident_start ch -> read_ident t
+  | Some _ -> read_operator t
+
+let next t =
+  match t.peeked with
+  | Some tok ->
+      t.peeked <- None;
+      tok
+  | None -> next_token t
+
+let peek t =
+  match t.peeked with
+  | Some tok -> tok
   | None ->
-      let span = Span.make ~file:lex.filename ~start ~end_:lex.pos in
-      add_error lex span ("unexpected operator " ^ raw);
-      make_token lex (Token.Error raw) start raw
-  | Some (kind, matched) ->
-      (* Rewind if we over-consumed relative to the matched prefix. *)
-      if String.length matched < String.length raw then (
-        let rewind = String.length raw - String.length matched in
-        lex.pos <-
-          {
-            lex.pos with
-            offset = lex.pos.offset - rewind;
-            col = lex.pos.col - rewind;
-          };
-        let raw' = matched in
-        make_token lex kind start raw')
-      else make_token lex kind start raw
+      let tok = next_token t in
+      t.peeked <- Some tok;
+      tok
 
-let lex_single lex start ch =
-  advance lex;
-  let kind =
-    match ch with
-    | '(' -> Token.Punct Token.LParen
-    | ')' -> Token.Punct Token.RParen
-    | '[' -> Token.Punct Token.LBracket
-    | ']' -> Token.Punct Token.RBracket
-    | '{' -> Token.Punct Token.LBrace
-    | '}' -> Token.Punct Token.RBrace
-    | ',' -> Token.Punct Token.Comma
-    | ';' -> Token.Punct Token.Semicolon
-    | '\\' -> Token.Punct Token.Backslash
-    | _ -> Token.Error (String.make 1 ch)
-  in
-  let raw = String.make 1 ch in
-  (match kind with
-  | Token.Error msg ->
-      let span = Span.make ~file:lex.filename ~start ~end_:lex.pos in
-      add_error lex span ("unexpected character " ^ msg)
-  | _ -> ());
-  make_token lex kind start raw
+let tokenize ?(file = "<input>") source =
+  try
+    let lex = create ~file source in
+    let acc = ref [] in
+    let rec loop () =
+      let tok = next lex in
+      acc := tok :: !acc;
+      if not (Token.is_eof tok) then loop ()
+    in
+    loop ();
+    Ok (Array.of_list (List.rev !acc))
+  with Error e -> Error e
 
-let rec next_token lex =
-  skip_whitespace lex;
-  let start = lex.pos in
-  match peek lex with
-  | None -> make_token lex Token.Eof start ""
-  | Some '/' when peek_at lex 1 = Some '/' ->
-      let tok = lex_line_comment lex start in
-      if lex.skip_comments then next_token lex else tok
-  | Some '/' when peek_at lex 1 = Some '*' ->
-      let tok = lex_block_comment lex start in
-      if lex.skip_comments then next_token lex else tok
-  | Some '"' -> lex_string_escapes lex start '"'
-  | Some '\'' when
-      (* Distinguish char literal from type variable 'a.
-         Char literal: 'x' or '\n' etc. Type var: 'ident *)
-      (match (peek_at lex 1, peek_at lex 2) with
-      | Some '\\', _ -> true
-      | Some ch, Some '\'' when ch <> '\'' -> true
-      | _ -> false) ->
-      lex_string_escapes lex start '\''
-  | Some '\'' ->
-      (* Type variable or lone apostrophe: treat leading ' as punct then ident,
-         or as a single punct if nothing follows. *)
-      advance lex;
-      (match peek lex with
-      | Some ch when is_ident_start ch ->
-          (* Rewind and lex as 'ident operator-ish: produce Apostrophe then let
-             caller/parser handle. Simpler: emit Ident including the quote. *)
-          let id_start = lex.pos in
-          while
-            match peek lex with
-            | Some c when is_ident_continue c -> true
-            | _ -> false
-          do
-            advance lex
-          done;
-          let name = "'" ^ slice_raw lex id_start in
-          make_token lex (Token.Ident name) start name
-      | _ ->
-          let raw = "'" in
-          make_token lex (Token.Punct Token.Apostrophe) start raw)
-  | Some ch when is_digit ch -> lex_number lex start
-  | Some ch when is_ident_start ch -> lex_ident lex start
-  | Some ch when Token.is_op_char ch -> lex_operator lex start
-  | Some ch -> lex_single lex start ch
-
-let tokenize ?(skip_comments = true) ~filename ~source () =
-  let lex = create ~skip_comments ~filename ~source () in
-  let rec loop acc =
-    let tok = next_token lex in
-    match tok.Token.kind with
-    | Token.Eof -> List.rev (tok :: acc)
-    | _ -> loop (tok :: acc)
-  in
-  let tokens = loop [] in
-  let diags = diagnostics lex in
-  if List.exists (fun d -> d.Diagnostic.severity = Diagnostic.Error) diags then
-    Error diags
-  else Ok tokens
-
-let tokenize_allowing_errors ?(skip_comments = true) ~filename ~source () =
-  let lex = create ~skip_comments ~filename ~source () in
-  let rec loop acc =
-    let tok = next_token lex in
-    match tok.Token.kind with
-    | Token.Eof -> List.rev (tok :: acc)
-    | _ -> loop (tok :: acc)
-  in
-  let tokens = loop [] in
-  (tokens, diagnostics lex)
-
-(** Convenience: lex an entire file contents into tokens, ignoring soft errors
-    that produced Error tokens but continuing. *)
-let lex_all ~filename ~source =
-  tokenize_allowing_errors ~filename ~source ()
+let tokenize_exn ?(file = "<input>") source =
+  match tokenize ~file source with
+  | Ok toks -> toks
+  | Error e -> raise (Error e)

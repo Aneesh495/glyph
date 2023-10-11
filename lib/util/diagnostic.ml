@@ -36,9 +36,12 @@ let severity_rank = function
 
 let label ?(primary = false) span message = { span; message; primary }
 
-let make ?(code = None) ?(labels = []) ?(notes = []) ?(help = None) severity
-    span message =
-  let code = match code with Some "" -> None | other -> other in
+let make ?code ?(labels = []) ?(notes = []) ?help severity span message =
+  let code =
+    match code with
+    | Some "" -> None
+    | other -> other
+  in
   { severity; code; message; span; labels; notes; help }
 
 let error ?code ?(labels = []) ?(notes = []) ?help span message =

@@ -1,478 +1,531 @@
-(** Mid-level IR: CFG of basic blocks in SSA form.
+(** SSA mid-level intermediate representation.
 
-    Values are virtual registers ([vreg]). Each assignment defines a unique
-    vreg. Control flow uses explicit terminators; φ-nodes sit at block heads.
-    Codegen lowers this to register-based bytecode via linear-scan allocation.
-*)
+    Blocks contain φ-nodes, a straight-line instruction list, and a single
+    terminator. Functions own a map of blocks plus an entry label. Programs
+    are collections of functions (plus optional string/float constant pools). *)
 
-type vreg = int
-type label = int
-type fn_id = int
+(* -------------------------------------------------------------------------- *)
+(* Labels, virtual registers, types                                           *)
+(* -------------------------------------------------------------------------- *)
 
-type typ =
-  | TInt
-  | TFloat
-  | TBool
-  | TChar
-  | TUnit
-  | TString
-  | TTuple of typ list
-  | TAdt of Ident.t * typ list
-  | TFun of typ list * typ
-  | TPtr
-  | TAny
+type label = Ident.t
+
+module Label = struct
+  type t = label
+  let equal = Ident.equal
+  let compare = Ident.compare
+  let hash = Ident.hash
+  let fresh name = Ident.fresh name
+  let of_string = Ident.of_string
+  let to_string = Ident.to_string
+  let pp = Ident.pp
+  module Set = Ident.Set
+  module Map = Ident.Map
+  module Tbl = Ident.Tbl
+end
+
+type vreg = Ident.t
+
+module Vreg = struct
+  type t = vreg
+  let equal = Ident.equal
+  let compare = Ident.compare
+  let hash = Ident.hash
+  let fresh name = Ident.fresh name
+  let of_string = Ident.of_string
+  let to_string = Ident.to_string
+  let pp = Ident.pp
+  module Set = Ident.Set
+  module Map = Ident.Map
+  module Tbl = Ident.Tbl
+end
+
+type ty =
+  | Ty_unit
+  | Ty_bool
+  | Ty_int
+  | Ty_float
+  | Ty_string
+  | Ty_char
+  | Ty_ptr
+  | Ty_fn of ty list * ty
+  | Ty_tuple of ty list
+  | Ty_adt of Ident.t
+  | Ty_any
+
+let rec ty_to_string = function
+  | Ty_unit -> "unit"
+  | Ty_bool -> "bool"
+  | Ty_int -> "int"
+  | Ty_float -> "float"
+  | Ty_string -> "string"
+  | Ty_char -> "char"
+  | Ty_ptr -> "ptr"
+  | Ty_fn (args, ret) ->
+      Printf.sprintf "(%s) -> %s"
+        (String.concat ", " (List.map ty_to_string args))
+        (ty_to_string ret)
+  | Ty_tuple ts ->
+      "(" ^ String.concat " * " (List.map ty_to_string ts) ^ ")"
+  | Ty_adt n -> Ident.to_string n
+  | Ty_any -> "?"
+
+(* -------------------------------------------------------------------------- *)
+(* Constants & values                                                         *)
+(* -------------------------------------------------------------------------- *)
 
 type const =
+  | CUnit
+  | CBool of bool
   | CInt of int
   | CFloat of float
-  | CBool of bool
-  | CChar of char
-  | CUnit
   | CString of string
+  | CChar of char
+  | CNull
+
+type value =
+  | VConst of const
+  | VReg of vreg
+  | VGlobal of Ident.t
+  | VUndef
+
+let const_equal a b =
+  match (a, b) with
+  | CUnit, CUnit | CNull, CNull -> true
+  | CBool x, CBool y -> x = y
+  | CInt x, CInt y -> x = y
+  | CFloat x, CFloat y -> Float.equal x y
+  | CString x, CString y -> String.equal x y
+  | CChar x, CChar y -> Char.equal x y
+  | _ -> false
+
+let value_equal a b =
+  match (a, b) with
+  | VConst c1, VConst c2 -> const_equal c1 c2
+  | VReg r1, VReg r2 -> Vreg.equal r1 r2
+  | VGlobal g1, VGlobal g2 -> Ident.equal g1 g2
+  | VUndef, VUndef -> true
+  | _ -> false
+
+let const_to_string = function
+  | CUnit -> "()"
+  | CBool true -> "true"
+  | CBool false -> "false"
+  | CInt n -> string_of_int n
+  | CFloat f -> string_of_float f
+  | CString s -> Printf.sprintf "%S" s
+  | CChar c -> Printf.sprintf "%C" c
+  | CNull -> "null"
+
+let value_to_string = function
+  | VConst c -> const_to_string c
+  | VReg r -> Vreg.to_string r
+  | VGlobal g -> "@" ^ Ident.to_string g
+  | VUndef -> "undef"
+
+(* -------------------------------------------------------------------------- *)
+(* Operators                                                                  *)
+(* -------------------------------------------------------------------------- *)
 
 type binop =
-  | Add
-  | Sub
-  | Mul
-  | Div
-  | Mod
-  | AddF
-  | SubF
-  | MulF
-  | DivF
-  | Eq
-  | Ne
-  | Lt
-  | Le
-  | Gt
-  | Ge
-  | EqF
-  | NeF
-  | LtF
-  | LeF
-  | GtF
-  | GeF
-  | And
-  | Or
+  | Add | Sub | Mul | Div | Mod
+  | Eq | Ne | Lt | Le | Gt | Ge
+  | And | Or | Xor | Shl | Shr
+  | FAdd | FSub | FMul | FDiv
 
 type unop =
-  | Neg
-  | NegF
-  | Not
+  | Neg | Not | FNeg | BitNot | IsNull | TagOf | Box | Unbox
 
-(** Pure / side-effecting SSA instructions (no control flow). *)
+let binop_to_string = function
+  | Add -> "add" | Sub -> "sub" | Mul -> "mul" | Div -> "div" | Mod -> "mod"
+  | Eq -> "eq" | Ne -> "ne" | Lt -> "lt" | Le -> "le" | Gt -> "gt" | Ge -> "ge"
+  | And -> "and" | Or -> "or" | Xor -> "xor" | Shl -> "shl" | Shr -> "shr"
+  | FAdd -> "fadd" | FSub -> "fsub" | FMul -> "fmul" | FDiv -> "fdiv"
+
+let unop_to_string = function
+  | Neg -> "neg" | Not -> "not" | FNeg -> "fneg" | BitNot -> "bitnot"
+  | IsNull -> "isnull" | TagOf -> "tagof" | Box -> "box" | Unbox -> "unbox"
+
+(* -------------------------------------------------------------------------- *)
+(* Instructions & terminators                                                 *)
+(* -------------------------------------------------------------------------- *)
+
 type instr =
-  | IConst of vreg * const
-  | IMove of vreg * vreg
-  | IBinop of vreg * binop * vreg * vreg
-  | IUnop of vreg * unop * vreg
-  | ICall of vreg * fn_id * vreg list
-  | ICallClosure of vreg * vreg * vreg list
-  | IAlloc of vreg * int * vreg list
-      (** [IAlloc (dst, tag, fields)] — heap ADT / tuple with tag. *)
-  | IGetField of vreg * vreg * int
-  | ISetField of vreg * int * vreg
-  | IMakeClosure of vreg * fn_id * vreg list
-  | ITupleGet of vreg * vreg * int
-  | ICons of vreg * vreg * vreg
-  | ICar of vreg * vreg
-  | ICdr of vreg * vreg
-  | IPrint of vreg
-  | IPhi of vreg * (label * vreg) list
-  | INop
+  | Assign of { dst : vreg; src : value; ty : ty; span : Span.t }
+  | Binop of {
+      dst : vreg;
+      op : binop;
+      lhs : value;
+      rhs : value;
+      ty : ty;
+      span : Span.t;
+    }
+  | Unop of {
+      dst : vreg;
+      op : unop;
+      arg : value;
+      ty : ty;
+      span : Span.t;
+    }
+  | Call of {
+      dst : vreg option;
+      callee : value;
+      args : value list;
+      ty : ty;
+      span : Span.t;
+    }
+  | Alloc of {
+      dst : vreg;
+      tag : int;
+      fields : value list;
+      ty : ty;
+      span : Span.t;
+    }
+  | Load of { dst : vreg; ptr : value; ty : ty; span : Span.t }
+  | Store of { ptr : value; value : value; ty : ty; span : Span.t }
+  | GetField of {
+      dst : vreg;
+      obj : value;
+      index : int;
+      ty : ty;
+      span : Span.t;
+    }
+  | SetField of {
+      obj : value;
+      index : int;
+      value : value;
+      ty : ty;
+      span : Span.t;
+    }
+  | Cast of { dst : vreg; src : value; ty : ty; span : Span.t }
+  | Phi of {
+      dst : vreg;
+      ty : ty;
+      incoming : (label * value) list;
+      span : Span.t;
+    }
 
 type terminator =
-  | TJump of label
-  | TBranch of vreg * label * label
-      (** [TBranch (cond, then_lbl, else_lbl)] *)
-  | TSwitch of vreg * (int * label) list * label
-      (** tag/value switch with default label *)
-  | TRet of vreg option
-  | TTailCall of fn_id * vreg list
-  | TTailCallClosure of vreg * vreg list
-  | THalt of vreg option
+  | Return of value option * Span.t
+  | Jump of label * Span.t
+  | Branch of {
+      cond : value;
+      then_ : label;
+      else_ : label;
+      span : Span.t;
+    }
+  | Switch of {
+      scrut : value;
+      cases : (int * label) list;
+      default : label;
+      span : Span.t;
+    }
+  | TailCall of {
+      callee : value;
+      args : value list;
+      span : Span.t;
+    }
+  | Unreachable of Span.t
 
 type block = {
   label : label;
-  phis : instr list;
-  instrs : instr list;
-  term : terminator;
-  span : Span.t;
+  mutable phis : instr list;
+  mutable instrs : instr list;
+  mutable terminator : terminator;
+  mutable preds : label list;
+  mutable succs : label list;
 }
 
 type func = {
-  id : fn_id;
   name : Ident.t;
-  params : vreg list;
-  param_tys : typ list;
-  ret_ty : typ;
-  blocks : block list;
+  params : (vreg * ty) list;
+  mutable blocks : block Label.Map.t;
   entry : label;
-  n_vregs : int;
-  is_main : bool;
+  return_ty : ty;
   span : Span.t;
+  mutable is_ssa : bool;
 }
 
 type program = {
-  functions : func list;
-  main : fn_id;
-  string_table : string list;
+  mutable funcs : func Ident.Map.t;
+  mutable externs : (Ident.t * int) list;
+  span : Span.t;
 }
 
 (* -------------------------------------------------------------------------- *)
 (* Constructors                                                               *)
 (* -------------------------------------------------------------------------- *)
 
-let dummy_span = Span.dummy
+let make_block ?(phis = []) ?(instrs = []) ?(preds = []) ?(succs = [])
+    label terminator =
+  { label; phis; instrs; terminator; preds; succs }
 
-let make_block ?(phis = []) ?(span = dummy_span) label instrs term =
-  { label; phis; instrs; term; span }
+let make_func ?(is_ssa = false) ~name ~params ~entry ~blocks ~return_ty
+    ?(span = Span.dummy) () =
+  { name; params; blocks; entry; return_ty; span; is_ssa }
 
-let make_func ~id ~name ~params ?(param_tys = []) ?(ret_ty = TAny)
-    ~blocks ~entry ?(n_vregs = 0) ?(is_main = false) ?(span = dummy_span) () =
-  let n_vregs =
-    if n_vregs > 0 then n_vregs
-    else
-      let max_v = ref (-1) in
-      let touch v = if v > !max_v then max_v := v in
-      List.iter touch params;
-      List.iter
-        (fun (b : block) ->
-          let scan_instr = function
-            | IConst (d, _)
-            | IMove (d, _)
-            | IBinop (d, _, _, _)
-            | IUnop (d, _, _)
-            | ICall (d, _, _)
-            | ICallClosure (d, _, _)
-            | IAlloc (d, _, _)
-            | IGetField (d, _, _)
-            | IMakeClosure (d, _, _)
-            | ITupleGet (d, _, _)
-            | ICons (d, _, _)
-            | ICar (d, _)
-            | ICdr (d, _)
-            | IPhi (d, _) ->
-                touch d
-            | ISetField (obj, _, _) -> touch obj
-            | IPrint v -> touch v
-            | INop -> ()
-          in
-          List.iter scan_instr b.phis;
-          List.iter scan_instr b.instrs;
-          match b.term with
-          | TBranch (c, _, _) -> touch c
-          | TSwitch (v, _, _) -> touch v
-          | TRet (Some v) | THalt (Some v) -> touch v
-          | TTailCall (_, args) | TTailCallClosure (_, args) ->
-              List.iter touch args
-          | _ -> ())
-        blocks;
-      !max_v + 1
+let make_program ?(externs = []) ?(span = Span.dummy) funcs =
+  let fmap =
+    List.fold_left (fun m f -> Ident.Map.add f.name f m) Ident.Map.empty funcs
   in
-  {
-    id;
-    name;
-    params;
-    param_tys;
-    ret_ty;
-    blocks;
-    entry;
-    n_vregs;
-    is_main;
-    span;
-  }
+  { funcs = fmap; externs; span }
 
-let make_program ?(string_table = []) ~functions ~main =
-  { functions; main; string_table }
+let empty_program ?(span = Span.dummy) () =
+  { funcs = Ident.Map.empty; externs = []; span }
 
-let find_func prog id =
-  List.find (fun (f : func) -> f.id = id) prog.functions
+let add_func prog f =
+  prog.funcs <- Ident.Map.add f.name f prog.funcs
 
-let find_func_opt prog id =
-  List.find_opt (fun (f : func) -> f.id = id) prog.functions
+let find_func prog name = Ident.Map.find_opt name prog.funcs
 
-let find_block (fn : func) lbl =
-  List.find (fun (b : block) -> b.label = lbl) fn.blocks
+let find_block (f : func) (l : label) = Label.Map.find_opt l f.blocks
 
-let find_block_opt (fn : func) lbl =
-  List.find_opt (fun (b : block) -> b.label = lbl) fn.blocks
-
-let block_labels (fn : func) = List.map (fun (b : block) -> b.label) fn.blocks
+let set_block (f : func) (b : block) =
+  f.blocks <- Label.Map.add b.label b f.blocks
 
 (* -------------------------------------------------------------------------- *)
-(* Def / use                                                                  *)
+(* Instruction helpers                                                        *)
 (* -------------------------------------------------------------------------- *)
 
-let instr_def = function
-  | IConst (d, _)
-  | IMove (d, _)
-  | IBinop (d, _, _, _)
-  | IUnop (d, _, _)
-  | ICall (d, _, _)
-  | ICallClosure (d, _, _)
-  | IAlloc (d, _, _)
-  | IGetField (d, _, _)
-  | IMakeClosure (d, _, _)
-  | ITupleGet (d, _, _)
-  | ICons (d, _, _)
-  | ICar (d, _)
-  | ICdr (d, _)
-  | IPhi (d, _) ->
-      Some d
-  | ISetField _ | IPrint _ | INop -> None
+let instr_span = function
+  | Assign { span; _ } | Binop { span; _ } | Unop { span; _ }
+  | Call { span; _ } | Alloc { span; _ } | Load { span; _ }
+  | Store { span; _ } | GetField { span; _ } | SetField { span; _ }
+  | Cast { span; _ } | Phi { span; _ } ->
+      span
+
+let terminator_span = function
+  | Return (_, sp) | Jump (_, sp) | Branch { span = sp; _ }
+  | Switch { span = sp; _ } | TailCall { span = sp; _ }
+  | Unreachable sp ->
+      sp
+
+let instr_defs = function
+  | Assign { dst; _ } | Binop { dst; _ } | Unop { dst; _ }
+  | Alloc { dst; _ } | Load { dst; _ } | GetField { dst; _ }
+  | Cast { dst; _ } | Phi { dst; _ } ->
+      [ dst ]
+  | Call { dst = Some d; _ } -> [ d ]
+  | Call { dst = None; _ } | Store _ | SetField _ -> []
+
+let value_uses = function
+  | VReg r -> [ r ]
+  | VConst _ | VGlobal _ | VUndef -> []
 
 let instr_uses = function
-  | IConst _ | INop -> []
-  | IMove (_, s) -> [ s ]
-  | IBinop (_, _, a, b) -> [ a; b ]
-  | IUnop (_, _, a) -> [ a ]
-  | ICall (_, _, args) -> args
-  | ICallClosure (_, clo, args) -> clo :: args
-  | IAlloc (_, _, fields) -> fields
-  | IGetField (_, obj, _) -> [ obj ]
-  | ISetField (obj, _, v) -> [ obj; v ]
-  | IMakeClosure (_, _, env) -> env
-  | ITupleGet (_, tup, _) -> [ tup ]
-  | ICons (_, h, t) -> [ h; t ]
-  | ICar (_, c) | ICdr (_, c) -> [ c ]
-  | IPrint v -> [ v ]
-  | IPhi (_, incoming) -> List.map snd incoming
+  | Assign { src; _ } -> value_uses src
+  | Binop { lhs; rhs; _ } -> value_uses lhs @ value_uses rhs
+  | Unop { arg; _ } -> value_uses arg
+  | Call { callee; args; _ } ->
+      value_uses callee @ List.concat_map value_uses args
+  | Alloc { fields; _ } -> List.concat_map value_uses fields
+  | Load { ptr; _ } -> value_uses ptr
+  | Store { ptr; value; _ } -> value_uses ptr @ value_uses value
+  | GetField { obj; _ } -> value_uses obj
+  | SetField { obj; value; _ } -> value_uses obj @ value_uses value
+  | Cast { src; _ } -> value_uses src
+  | Phi { incoming; _ } ->
+      List.concat_map (fun (_, v) -> value_uses v) incoming
 
-let term_uses = function
-  | TJump _ -> []
-  | TBranch (c, _, _) -> [ c ]
-  | TSwitch (v, _, _) -> [ v ]
-  | TRet (Some v) | THalt (Some v) -> [ v ]
-  | TRet None | THalt None -> []
-  | TTailCall (_, args) -> args
-  | TTailCallClosure (clo, args) -> clo :: args
+let terminator_uses = function
+  | Return (Some v, _) -> value_uses v
+  | Return (None, _) | Jump _ | Unreachable _ -> []
+  | Branch { cond; _ } -> value_uses cond
+  | Switch { scrut; _ } -> value_uses scrut
+  | TailCall { callee; args; _ } ->
+      value_uses callee @ List.concat_map value_uses args
 
-let term_successors = function
-  | TJump l -> [ l ]
-  | TBranch (_, t, e) -> [ t; e ]
-  | TSwitch (_, cases, d) -> d :: List.map snd cases
-  | TRet _ | THalt _ | TTailCall _ | TTailCallClosure _ -> []
+let terminator_succs = function
+  | Return _ | TailCall _ | Unreachable _ -> []
+  | Jump (l, _) -> [ l ]
+  | Branch { then_; else_; _ } -> [ then_; else_ ]
+  | Switch { cases; default; _ } ->
+      default :: List.map snd cases
+
+let is_phi = function Phi _ -> true | _ -> false
+
+let map_instr_values ~on_use ~on_def instr =
+  let mv v = on_use v in
+  match instr with
+  | Assign ({ dst; src; _ } as i) ->
+      Assign { i with dst = on_def dst; src = mv src }
+  | Binop ({ dst; lhs; rhs; _ } as i) ->
+      Binop { i with dst = on_def dst; lhs = mv lhs; rhs = mv rhs }
+  | Unop ({ dst; arg; _ } as i) ->
+      Unop { i with dst = on_def dst; arg = mv arg }
+  | Call ({ dst; callee; args; _ } as i) ->
+      Call
+        {
+          i with
+          dst = Option.map on_def dst;
+          callee = mv callee;
+          args = List.map mv args;
+        }
+  | Alloc ({ dst; fields; _ } as i) ->
+      Alloc { i with dst = on_def dst; fields = List.map mv fields }
+  | Load ({ dst; ptr; _ } as i) ->
+      Load { i with dst = on_def dst; ptr = mv ptr }
+  | Store ({ ptr; value; _ } as i) ->
+      Store { i with ptr = mv ptr; value = mv value }
+  | GetField ({ dst; obj; _ } as i) ->
+      GetField { i with dst = on_def dst; obj = mv obj }
+  | SetField ({ obj; value; _ } as i) ->
+      SetField { i with obj = mv obj; value = mv value }
+  | Cast ({ dst; src; _ } as i) ->
+      Cast { i with dst = on_def dst; src = mv src }
+  | Phi ({ dst; incoming; _ } as i) ->
+      Phi
+        {
+          i with
+          dst = on_def dst;
+          incoming = List.map (fun (l, v) -> (l, mv v)) incoming;
+        }
+
+let map_terminator_values f = function
+  | Return (v, sp) -> Return (Option.map f v, sp)
+  | Jump _ as t -> t
+  | Branch ({ cond; _ } as b) -> Branch { b with cond = f cond }
+  | Switch ({ scrut; _ } as s) -> Switch { s with scrut = f scrut }
+  | TailCall ({ callee; args; _ } as t) ->
+      TailCall { t with callee = f callee; args = List.map f args }
+  | Unreachable _ as t -> t
+
+(* -------------------------------------------------------------------------- *)
+(* Block / function iteration                                                 *)
+(* -------------------------------------------------------------------------- *)
+
+let block_all_instrs b = b.phis @ b.instrs
+
+let iter_blocks f func = Label.Map.iter (fun _ b -> f b) func.blocks
+
+let fold_blocks f acc func =
+  Label.Map.fold (fun _ b acc -> f acc b) func.blocks acc
+
+let func_labels f = Label.Map.bindings f.blocks |> List.map fst
+
+let replace_value_in_instr ~(from : vreg) ~(to_ : value) instr =
+  let on_use = function
+    | VReg r when Vreg.equal r from -> to_
+    | v -> v
+  in
+  map_instr_values ~on_use ~on_def:Fun.id instr
+
+let replace_value_in_terminator ~(from : vreg) ~(to_ : value) term =
+  map_terminator_values
+    (function VReg r when Vreg.equal r from -> to_ | v -> v)
+    term
 
 (* -------------------------------------------------------------------------- *)
 (* Pretty-printing                                                            *)
 (* -------------------------------------------------------------------------- *)
 
-let pp_const fmt = function
-  | CInt i -> Format.fprintf fmt "%d" i
-  | CFloat f -> Format.fprintf fmt "%g" f
-  | CBool b -> Format.fprintf fmt "%b" b
-  | CChar c -> Format.fprintf fmt "%C" c
-  | CUnit -> Format.fprintf fmt "()"
-  | CString s -> Format.fprintf fmt "%S" s
-
-let binop_to_string = function
-  | Add -> "+"
-  | Sub -> "-"
-  | Mul -> "*"
-  | Div -> "/"
-  | Mod -> "%"
-  | AddF -> "+."
-  | SubF -> "-."
-  | MulF -> "*."
-  | DivF -> "/."
-  | Eq -> "=="
-  | Ne -> "!="
-  | Lt -> "<"
-  | Le -> "<="
-  | Gt -> ">"
-  | Ge -> ">="
-  | EqF -> "==."
-  | NeF -> "!=."
-  | LtF -> "<."
-  | LeF -> "<=."
-  | GtF -> ">."
-  | GeF -> ">=."
-  | And -> "&&"
-  | Or -> "||"
-
-let unop_to_string = function
-  | Neg -> "-"
-  | NegF -> "-."
-  | Not -> "!"
-
-let pp_vreg fmt v = Format.fprintf fmt "%%%d" v
+let pp_ty fmt ty = Format.pp_print_string fmt (ty_to_string ty)
+let pp_value fmt v = Format.pp_print_string fmt (value_to_string v)
 
 let pp_instr fmt = function
-  | IConst (d, c) -> Format.fprintf fmt "%a = const %a" pp_vreg d pp_const c
-  | IMove (d, s) -> Format.fprintf fmt "%a = %a" pp_vreg d pp_vreg s
-  | IBinop (d, op, a, b) ->
-      Format.fprintf fmt "%a = %a %s %a" pp_vreg d pp_vreg a
-        (binop_to_string op) pp_vreg b
-  | IUnop (d, op, a) ->
-      Format.fprintf fmt "%a = %s%a" pp_vreg d (unop_to_string op) pp_vreg a
-  | ICall (d, fid, args) ->
-      Format.fprintf fmt "%a = call fn%d (%a)" pp_vreg d fid
-        (Format.pp_print_list
-           ~pp_sep:(fun f () -> Format.fprintf f ", ")
-           pp_vreg)
-        args
-  | ICallClosure (d, clo, args) ->
-      Format.fprintf fmt "%a = callclo %a (%a)" pp_vreg d pp_vreg clo
-        (Format.pp_print_list
-           ~pp_sep:(fun f () -> Format.fprintf f ", ")
-           pp_vreg)
-        args
-  | IAlloc (d, tag, fields) ->
-      Format.fprintf fmt "%a = alloc tag=%d [%a]" pp_vreg d tag
-        (Format.pp_print_list
-           ~pp_sep:(fun f () -> Format.fprintf f ", ")
-           pp_vreg)
-        fields
-  | IGetField (d, obj, i) ->
-      Format.fprintf fmt "%a = %a.field[%d]" pp_vreg d pp_vreg obj i
-  | ISetField (obj, i, v) ->
-      Format.fprintf fmt "%a.field[%d] := %a" pp_vreg obj i pp_vreg v
-  | IMakeClosure (d, fid, env) ->
-      Format.fprintf fmt "%a = closure fn%d env=[%a]" pp_vreg d fid
-        (Format.pp_print_list
-           ~pp_sep:(fun f () -> Format.fprintf f ", ")
-           pp_vreg)
-        env
-  | ITupleGet (d, t, i) ->
-      Format.fprintf fmt "%a = %a.tuple[%d]" pp_vreg d pp_vreg t i
-  | ICons (d, h, t) ->
-      Format.fprintf fmt "%a = cons %a %a" pp_vreg d pp_vreg h pp_vreg t
-  | ICar (d, c) -> Format.fprintf fmt "%a = car %a" pp_vreg d pp_vreg c
-  | ICdr (d, c) -> Format.fprintf fmt "%a = cdr %a" pp_vreg d pp_vreg c
-  | IPrint v -> Format.fprintf fmt "print %a" pp_vreg v
-  | IPhi (d, incoming) ->
-      Format.fprintf fmt "%a = φ(" pp_vreg d;
-      List.iteri
-        (fun i (lbl, v) ->
-          if i > 0 then Format.fprintf fmt ", ";
-          Format.fprintf fmt "L%d:%a" lbl pp_vreg v)
-        incoming;
-      Format.fprintf fmt ")"
-  | INop -> Format.fprintf fmt "nop"
+  | Assign { dst; src; ty; _ } ->
+      Format.fprintf fmt "  %a : %a = %a" Vreg.pp dst pp_ty ty pp_value src
+  | Binop { dst; op; lhs; rhs; ty; _ } ->
+      Format.fprintf fmt "  %a : %a = %s %a, %a" Vreg.pp dst pp_ty ty
+        (binop_to_string op) pp_value lhs pp_value rhs
+  | Unop { dst; op; arg; ty; _ } ->
+      Format.fprintf fmt "  %a : %a = %s %a" Vreg.pp dst pp_ty ty
+        (unop_to_string op) pp_value arg
+  | Call { dst; callee; args; ty; _ } ->
+      (match dst with
+      | Some d -> Format.fprintf fmt "  %a : %a = call %a(" Vreg.pp d pp_ty ty pp_value callee
+      | None -> Format.fprintf fmt "  call %a(" pp_value callee);
+      Format.pp_print_list
+        ~pp_sep:(fun fmt () -> Format.pp_print_string fmt ", ")
+        pp_value fmt args;
+      Format.pp_print_string fmt ")"
+  | Alloc { dst; tag; fields; ty; _ } ->
+      Format.fprintf fmt "  %a : %a = alloc tag=%d [" Vreg.pp dst pp_ty ty tag;
+      Format.pp_print_list
+        ~pp_sep:(fun fmt () -> Format.pp_print_string fmt ", ")
+        pp_value fmt fields;
+      Format.pp_print_string fmt "]"
+  | Load { dst; ptr; ty; _ } ->
+      Format.fprintf fmt "  %a : %a = load %a" Vreg.pp dst pp_ty ty pp_value ptr
+  | Store { ptr; value; _ } ->
+      Format.fprintf fmt "  store %a, %a" pp_value ptr pp_value value
+  | GetField { dst; obj; index; ty; _ } ->
+      Format.fprintf fmt "  %a : %a = getfield %a, %d" Vreg.pp dst pp_ty ty
+        pp_value obj index
+  | SetField { obj; index; value; _ } ->
+      Format.fprintf fmt "  setfield %a, %d, %a" pp_value obj index pp_value value
+  | Cast { dst; src; ty; _ } ->
+      Format.fprintf fmt "  %a : %a = cast %a" Vreg.pp dst pp_ty ty pp_value src
+  | Phi { dst; ty; incoming; _ } ->
+      Format.fprintf fmt "  %a : %a = phi " Vreg.pp dst pp_ty ty;
+      Format.pp_print_list
+        ~pp_sep:(fun fmt () -> Format.pp_print_string fmt ", ")
+        (fun fmt (l, v) ->
+          Format.fprintf fmt "[%a: %a]" Label.pp l pp_value v)
+        fmt incoming
 
-let pp_term fmt = function
-  | TJump l -> Format.fprintf fmt "jump L%d" l
-  | TBranch (c, t, e) ->
-      Format.fprintf fmt "br %a, L%d, L%d" pp_vreg c t e
-  | TSwitch (v, cases, d) ->
-      Format.fprintf fmt "switch %a [" pp_vreg v;
+let pp_terminator fmt = function
+  | Return (None, _) -> Format.pp_print_string fmt "  ret"
+  | Return (Some v, _) -> Format.fprintf fmt "  ret %a" pp_value v
+  | Jump (l, _) -> Format.fprintf fmt "  jump %a" Label.pp l
+  | Branch { cond; then_; else_; _ } ->
+      Format.fprintf fmt "  branch %a, %a, %a" pp_value cond Label.pp then_
+        Label.pp else_
+  | Switch { scrut; cases; default; _ } ->
+      Format.fprintf fmt "  switch %a" pp_value scrut;
       List.iter
-        (fun (tag, l) -> Format.fprintf fmt " %d -> L%d;" tag l)
+        (fun (tag, l) -> Format.fprintf fmt " [%d -> %a]" tag Label.pp l)
         cases;
-      Format.fprintf fmt " default -> L%d ]" d
-  | TRet None -> Format.fprintf fmt "ret"
-  | TRet (Some v) -> Format.fprintf fmt "ret %a" pp_vreg v
-  | TTailCall (fid, args) ->
-      Format.fprintf fmt "tailcall fn%d (%a)" fid
-        (Format.pp_print_list
-           ~pp_sep:(fun f () -> Format.fprintf f ", ")
-           pp_vreg)
-        args
-  | TTailCallClosure (clo, args) ->
-      Format.fprintf fmt "tailcallclo %a (%a)" pp_vreg clo
-        (Format.pp_print_list
-           ~pp_sep:(fun f () -> Format.fprintf f ", ")
-           pp_vreg)
-        args
-  | THalt None -> Format.fprintf fmt "halt"
-  | THalt (Some v) -> Format.fprintf fmt "halt %a" pp_vreg v
+      Format.fprintf fmt " default %a" Label.pp default
+  | TailCall { callee; args; _ } ->
+      Format.fprintf fmt "  tailcall %a(" pp_value callee;
+      Format.pp_print_list
+        ~pp_sep:(fun fmt () -> Format.pp_print_string fmt ", ")
+        pp_value fmt args;
+      Format.pp_print_string fmt ")"
+  | Unreachable _ -> Format.pp_print_string fmt "  unreachable"
 
-let pp_block fmt (b : block) =
-  Format.fprintf fmt "L%d:\n" b.label;
-  List.iter (fun i -> Format.fprintf fmt "  %a\n" pp_instr i) b.phis;
-  List.iter (fun i -> Format.fprintf fmt "  %a\n" pp_instr i) b.instrs;
-  Format.fprintf fmt "  %a\n" pp_term b.term
-
-let pp_func fmt (f : func) =
-  Format.fprintf fmt "fn%d %s(%a) {\n" f.id (Ident.to_string f.name)
-    (Format.pp_print_list
-       ~pp_sep:(fun fmt () -> Format.fprintf fmt ", ")
-       pp_vreg)
-    f.params;
-  List.iter (pp_block fmt) f.blocks;
-  Format.fprintf fmt "}\n"
-
-let pp_program fmt (p : program) =
-  Format.fprintf fmt "; Glyph MIR — main=fn%d\n" p.main;
-  List.iter (pp_func fmt) p.functions
-
-(* -------------------------------------------------------------------------- *)
-(* CFG helpers                                                                *)
-(* -------------------------------------------------------------------------- *)
-
-let predecessors (fn : func) : (label, label list) Hashtbl.t =
-  let pred = Hashtbl.create (List.length fn.blocks) in
+let pp_block fmt b =
+  Format.fprintf fmt "%a:\n" Label.pp b.label;
   List.iter
-    (fun (b : block) -> Hashtbl.replace pred b.label [])
-    fn.blocks;
+    (fun i ->
+      pp_instr fmt i;
+      Format.pp_print_newline fmt ())
+    b.phis;
   List.iter
-    (fun (b : block) ->
-      List.iter
-        (fun succ ->
-          let ps = Hashtbl.find pred succ in
-          if not (List.mem b.label ps) then
-            Hashtbl.replace pred succ (b.label :: ps))
-        (term_successors b.term))
-    fn.blocks;
-  pred
+    (fun i ->
+      pp_instr fmt i;
+      Format.pp_print_newline fmt ())
+    b.instrs;
+  pp_terminator fmt b.terminator;
+  Format.pp_print_newline fmt ()
 
-let successors_of (fn : func) lbl =
-  match find_block_opt fn lbl with
-  | None -> []
-  | Some b -> term_successors b.term
+let pp_func fmt f =
+  Format.fprintf fmt "fun %a(" Ident.pp f.name;
+  Format.pp_print_list
+    ~pp_sep:(fun fmt () -> Format.pp_print_string fmt ", ")
+    (fun fmt (r, ty) -> Format.fprintf fmt "%a: %a" Vreg.pp r pp_ty ty)
+    fmt f.params;
+  Format.fprintf fmt ") -> %a {%s\n" pp_ty f.return_ty
+    (if f.is_ssa then " ; ssa" else "");
+  (* Print entry first, then others in label order. *)
+  (match find_block f f.entry with
+  | Some b -> pp_block fmt b
+  | None -> ());
+  Label.Map.iter
+    (fun l b ->
+      if not (Label.equal l f.entry) then pp_block fmt b)
+    f.blocks;
+  Format.pp_print_string fmt "}\n"
 
-let iter_instrs (fn : func) f =
-  List.iter
-    (fun (b : block) ->
-      List.iter (fun i -> f b.label i) b.phis;
-      List.iter (fun i -> f b.label i) b.instrs)
-    fn.blocks
+let pp_program fmt prog =
+  Ident.Map.iter (fun _ f -> pp_func fmt f) prog.funcs
 
-let all_vregs (fn : func) : vreg list =
-  let set = Hashtbl.create fn.n_vregs in
-  List.iter (fun v -> Hashtbl.replace set v ()) fn.params;
-  iter_instrs fn (fun _ i ->
-      (match instr_def i with
-      | Some d -> Hashtbl.replace set d ()
-      | None -> ());
-      List.iter (fun u -> Hashtbl.replace set u ()) (instr_uses i));
-  List.iter
-    (fun (b : block) ->
-      List.iter (fun u -> Hashtbl.replace set u ()) (term_uses b.term))
-    fn.blocks;
-  Hashtbl.fold (fun v () acc -> v :: acc) set [] |> List.sort Int.compare
+(** Count instructions across a function (phis + instrs, not terminators). *)
+let func_instr_count f =
+  fold_blocks
+    (fun n b -> n + List.length b.phis + List.length b.instrs + 1)
+    0 f
 
-let validate_func (fn : func) : string list =
-  let errs = ref [] in
-  let err s = errs := s :: !errs in
-  (match find_block_opt fn fn.entry with
-  | None -> err (Printf.sprintf "entry L%d missing" fn.entry)
-  | Some _ -> ());
-  let seen = Hashtbl.create 16 in
-  List.iter
-    (fun (b : block) ->
-      if Hashtbl.mem seen b.label then
-        err (Printf.sprintf "duplicate block L%d" b.label)
-      else Hashtbl.add seen b.label ();
-      List.iter
-        (fun succ ->
-          if find_block_opt fn succ = None then
-            err
-              (Printf.sprintf "L%d jumps to missing L%d" b.label succ))
-        (term_successors b.term))
-    fn.blocks;
-  List.rev !errs
-
-let validate_program (p : program) : string list =
-  let errs = ref [] in
-  (match find_func_opt p p.main with
-  | None -> errs := Printf.sprintf "main fn%d not found" p.main :: !errs
-  | Some _ -> ());
-  List.iter
-    (fun f ->
-      List.iter
-        (fun e -> errs := Printf.sprintf "fn%d: %s" f.id e :: !errs)
-        (validate_func f))
-    p.functions;
-  List.rev !errs
+let program_funcs prog =
+  Ident.Map.bindings prog.funcs |> List.map snd

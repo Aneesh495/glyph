@@ -56,9 +56,18 @@ environment; the VM allocates them on the heap and the collector reclaims them.
 | **codegen** | Register-based bytecode emission |
 | **vm** | Interpreter + semi-space copying GC + builtins |
 
-See [docs/architecture.md](docs/architecture.md) for the full walkthrough,
-[docs/language.md](docs/language.md) for the surface language, and
-[docs/vm.md](docs/vm.md) for the ISA and collector.
+## Docs
+
+| Doc | Contents |
+|-----|----------|
+| [docs/architecture.md](docs/architecture.md) | End-to-end pipeline, modules, data flow |
+| [docs/language.md](docs/language.md) | Lexical structure, EBNF, patterns, examples |
+| [docs/type-system.md](docs/type-system.md) | Hindley–Milner, unification, levels, occurs check |
+| [docs/ir.md](docs/ir.md) | HIR, MIR, SSA / φ nodes, lowering |
+| [docs/vm.md](docs/vm.md) | Bytecode ISA, frames, semi-space GC |
+| [docs/optimizations.md](docs/optimizations.md) | Each opt pass with before/after IR |
+| [docs/diagrams/pipeline.md](docs/diagrams/pipeline.md) | Mermaid diagrams only |
+| [docs/contributing.md](docs/contributing.md) | Build, test, add a pass |
 
 ## Project layout
 

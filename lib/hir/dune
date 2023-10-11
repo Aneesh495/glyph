@@ -1,0 +1,5 @@
+(library
+ (name glyph_hir)
+ (public_name glyph.hir)
+ (libraries glyph_util glyph_syntax glyph_types)
+ (flags (:standard -w +a-4-29-40-41-42-44-45-48-58-59-60)))

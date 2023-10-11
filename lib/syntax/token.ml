@@ -1,29 +1,54 @@
-(** Lexical tokens for Glyph source. *)
+(** Lexical tokens for the Glyph surface language. *)
 
 type keyword =
+  | Kw_fn
+  | Kw_type
   | Kw_let
-  | Kw_rec
-  | Kw_and
   | Kw_in
   | Kw_if
   | Kw_then
   | Kw_else
   | Kw_match
   | Kw_with
-  | Kw_type
-  | Kw_of
-  | Kw_fun
-  | Kw_fn
   | Kw_true
   | Kw_false
-  | Kw_external
-  | Kw_module
-  | Kw_open
-  | Kw_as
-  | Kw_when
-  | Kw_mutable
+  | Kw_and
+  | Kw_or
+  | Kw_not
+  | Kw_extern
+  | Kw_mut
+  | Kw_rec
 
-type punct =
+type binop =
+  | Op_add
+  | Op_sub
+  | Op_mul
+  | Op_div
+  | Op_mod
+  | Op_eq
+  | Op_neq
+  | Op_lt
+  | Op_le
+  | Op_gt
+  | Op_ge
+  | Op_and
+  | Op_or
+  | Op_cons
+  | Op_pipe
+
+type unop =
+  | Op_neg
+  | Op_not
+
+type kind =
+  | Ident of string
+  | Ctor of string
+  | Int of int64
+  | Float of float
+  | String of string
+  | Char of char
+  | Keyword of keyword
+  | Binop of binop
   | LParen
   | RParen
   | LBracket
@@ -31,120 +56,96 @@ type punct =
   | LBrace
   | RBrace
   | Comma
-  | Semicolon
+  | Dot
   | Colon
-  | ColonColon
+  | Semicolon
   | Arrow
   | FatArrow
+  | Equal
   | Pipe
-  | Dot
   | Underscore
-  | Eq
-  | Neq
-  | Lt
-  | Le
-  | Gt
-  | Ge
-  | Plus
-  | Minus
-  | Star
-  | Slash
-  | Percent
-  | AmpAmp
-  | PipePipe
-  | AtAt
-  | DotDot
-  | Bang
-  | Question
-  | Tilde
-  | Backslash
-  | Apostrophe
-
-type kind =
-  | Keyword of keyword
-  | Punct of punct
-  | Operator of string
-  | Lit_int of string
-  | Lit_float of string
-  | Lit_string of string
-  | Lit_char of char
-  | Ident of string
-  | UpperIdent of string
-  | Comment of string
   | Eof
-  | Error of string
 
 type t = {
   kind : kind;
   span : Span.t;
-  raw : string;
+  lexeme : string;
 }
 
-let make kind span raw = { kind; span; raw }
+let make kind ~span ~lexeme = { kind; span; lexeme }
+let kind t = t.kind
+let span t = t.span
+let lexeme t = t.lexeme
 
-let keyword_table : (string, keyword) Hashtbl.t =
-  let tbl = Hashtbl.create 32 in
-  List.iter
-    (fun (name, kw) -> Hashtbl.add tbl name kw)
-    [
-      ("let", Kw_let);
-      ("rec", Kw_rec);
-      ("and", Kw_and);
-      ("in", Kw_in);
-      ("if", Kw_if);
-      ("then", Kw_then);
-      ("else", Kw_else);
-      ("match", Kw_match);
-      ("with", Kw_with);
-      ("type", Kw_type);
-      ("of", Kw_of);
-      ("fun", Kw_fun);
-      ("fn", Kw_fn);
-      ("true", Kw_true);
-      ("false", Kw_false);
-      ("external", Kw_external);
-      ("module", Kw_module);
-      ("open", Kw_open);
-      ("as", Kw_as);
-      ("when", Kw_when);
-      ("mutable", Kw_mutable);
-    ];
-  tbl
+let keyword_of_string = function
+  | "fn" -> Some Kw_fn
+  | "type" -> Some Kw_type
+  | "let" -> Some Kw_let
+  | "in" -> Some Kw_in
+  | "if" -> Some Kw_if
+  | "then" -> Some Kw_then
+  | "else" -> Some Kw_else
+  | "match" -> Some Kw_match
+  | "with" -> Some Kw_with
+  | "true" -> Some Kw_true
+  | "false" -> Some Kw_false
+  | "and" -> Some Kw_and
+  | "or" -> Some Kw_or
+  | "not" -> Some Kw_not
+  | "extern" -> Some Kw_extern
+  | "mut" -> Some Kw_mut
+  | "rec" -> Some Kw_rec
+  | _ -> None
 
-let lookup_keyword name = Hashtbl.find_opt keyword_table name
-
-let keyword_of_ident name =
-  match lookup_keyword name with
-  | Some kw -> Keyword kw
-  | None ->
-      if String.length name > 0 && name.[0] >= 'A' && name.[0] <= 'Z' then
-        UpperIdent name
-      else Ident name
-
-let keyword_to_string = function
+let string_of_keyword = function
+  | Kw_fn -> "fn"
+  | Kw_type -> "type"
   | Kw_let -> "let"
-  | Kw_rec -> "rec"
-  | Kw_and -> "and"
   | Kw_in -> "in"
   | Kw_if -> "if"
   | Kw_then -> "then"
   | Kw_else -> "else"
   | Kw_match -> "match"
   | Kw_with -> "with"
-  | Kw_type -> "type"
-  | Kw_of -> "of"
-  | Kw_fun -> "fun"
-  | Kw_fn -> "fn"
   | Kw_true -> "true"
   | Kw_false -> "false"
-  | Kw_external -> "external"
-  | Kw_module -> "module"
-  | Kw_open -> "open"
-  | Kw_as -> "as"
-  | Kw_when -> "when"
-  | Kw_mutable -> "mutable"
+  | Kw_and -> "and"
+  | Kw_or -> "or"
+  | Kw_not -> "not"
+  | Kw_extern -> "extern"
+  | Kw_mut -> "mut"
+  | Kw_rec -> "rec"
 
-let punct_to_string = function
+let string_of_binop = function
+  | Op_add -> "+"
+  | Op_sub -> "-"
+  | Op_mul -> "*"
+  | Op_div -> "/"
+  | Op_mod -> "%"
+  | Op_eq -> "=="
+  | Op_neq -> "!="
+  | Op_lt -> "<"
+  | Op_le -> "<="
+  | Op_gt -> ">"
+  | Op_ge -> ">="
+  | Op_and -> "&&"
+  | Op_or -> "||"
+  | Op_cons -> "::"
+  | Op_pipe -> "|>"
+
+let string_of_unop = function
+  | Op_neg -> "-"
+  | Op_not -> "not"
+
+let string_of_kind = function
+  | Ident s -> s
+  | Ctor s -> s
+  | Int n -> Int64.to_string n
+  | Float f -> string_of_float f
+  | String s -> Printf.sprintf "%S" s
+  | Char c -> Printf.sprintf "%C" c
+  | Keyword kw -> string_of_keyword kw
+  | Binop op -> string_of_binop op
   | LParen -> "("
   | RParen -> ")"
   | LBracket -> "["
@@ -152,130 +153,28 @@ let punct_to_string = function
   | LBrace -> "{"
   | RBrace -> "}"
   | Comma -> ","
-  | Semicolon -> ";"
+  | Dot -> "."
   | Colon -> ":"
-  | ColonColon -> "::"
+  | Semicolon -> ";"
   | Arrow -> "->"
   | FatArrow -> "=>"
+  | Equal -> "="
   | Pipe -> "|"
-  | Dot -> "."
   | Underscore -> "_"
-  | Eq -> "="
-  | Neq -> "<>"
-  | Lt -> "<"
-  | Le -> "<="
-  | Gt -> ">"
-  | Ge -> ">="
-  | Plus -> "+"
-  | Minus -> "-"
-  | Star -> "*"
-  | Slash -> "/"
-  | Percent -> "%"
-  | AmpAmp -> "&&"
-  | PipePipe -> "||"
-  | AtAt -> "@@"
-  | DotDot -> ".."
-  | Bang -> "!"
-  | Question -> "?"
-  | Tilde -> "~"
-  | Backslash -> "\\"
-  | Apostrophe -> "'"
-
-let kind_to_string = function
-  | Keyword kw -> keyword_to_string kw
-  | Punct p -> punct_to_string p
-  | Operator op -> op
-  | Lit_int s -> s
-  | Lit_float s -> s
-  | Lit_string s -> Printf.sprintf "%S" s
-  | Lit_char c -> Printf.sprintf "%C" c
-  | Ident s -> s
-  | UpperIdent s -> s
-  | Comment s -> Printf.sprintf "(* %s *)" s
   | Eof -> "<eof>"
-  | Error msg -> Printf.sprintf "<error: %s>" msg
 
-let to_string tok =
-  Printf.sprintf "%s @ %s" (kind_to_string tok.kind) (Span.to_string tok.span)
+let is_eof t = t.kind = Eof
+let is_keyword t kw = t.kind = Keyword kw
 
-let pp fmt tok = Format.pp_print_string fmt (to_string tok)
-
-let is_eof tok = match tok.kind with Eof -> true | _ -> false
-let is_error tok = match tok.kind with Error _ -> true | _ -> false
-
-let is_keyword tok kw =
-  match tok.kind with Keyword k -> k = kw | _ -> false
-
-let is_punct tok p =
-  match tok.kind with Punct q -> q = p | _ -> false
-
-let is_ident tok =
-  match tok.kind with Ident _ | UpperIdent _ -> true | _ -> false
-
-let is_literal tok =
-  match tok.kind with
-  | Lit_int _ | Lit_float _ | Lit_string _ | Lit_char _
-  | Keyword (Kw_true | Kw_false) ->
-      true
+let is_ident t =
+  match t.kind with
+  | Ident _ -> true
   | _ -> false
 
-(** Operator characters that may form multi-character operators. *)
-let is_op_char = function
-  | '!' | '$' | '%' | '&' | '*' | '+' | '-' | '.' | '/' | ':' | '<' | '=' | '>'
-  | '?' | '@' | '^' | '|' | '~' | '#' ->
-      true
+let is_ctor t =
+  match t.kind with
+  | Ctor _ -> true
   | _ -> false
 
-(** Map a known operator lexeme to a punctuation token when possible. *)
-let classify_operator op =
-  match op with
-  | "->" -> Punct Arrow
-  | "=>" -> Punct FatArrow
-  | "::" -> Punct ColonColon
-  | ":" -> Punct Colon
-  | "=" -> Punct Eq
-  | "<>" -> Punct Neq
-  | "<" -> Punct Lt
-  | "<=" -> Punct Le
-  | ">" -> Punct Gt
-  | ">=" -> Punct Ge
-  | "+" -> Punct Plus
-  | "-" -> Punct Minus
-  | "*" -> Punct Star
-  | "/" -> Punct Slash
-  | "%" -> Punct Percent
-  | "&&" -> Punct AmpAmp
-  | "||" -> Punct PipePipe
-  | "@@" -> Punct AtAt
-  | ".." -> Punct DotDot
-  | "|" -> Punct Pipe
-  | "!" -> Punct Bang
-  | "?" -> Punct Question
-  | "~" -> Punct Tilde
-  | "." -> Punct Dot
-  | _ -> Operator op
-
-let all_keywords =
-  [
-    Kw_let;
-    Kw_rec;
-    Kw_and;
-    Kw_in;
-    Kw_if;
-    Kw_then;
-    Kw_else;
-    Kw_match;
-    Kw_with;
-    Kw_type;
-    Kw_of;
-    Kw_fun;
-    Kw_fn;
-    Kw_true;
-    Kw_false;
-    Kw_external;
-    Kw_module;
-    Kw_open;
-    Kw_as;
-    Kw_when;
-    Kw_mutable;
-  ]
+let pp_kind fmt k = Format.pp_print_string fmt (string_of_kind k)
+let pp fmt t = Format.fprintf fmt "%s@%a" (string_of_kind t.kind) Span.pp t.span
