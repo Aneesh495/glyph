@@ -1,641 +1,361 @@
-(** Glyph bytecode ISA.
+(** Glyph bytecode opcodes and instruction encoding. *)
 
-    Register-based instructions. Each opcode packs into one or more [int32]
-    words via [encode] / [decode]. The interpreter usually keeps the structured
-    [opcode] form; encoding is for serialization and the constant pool layout.
+type op =
+  | Op_nop
+  | Op_load_const
+  | Op_move
+  | Op_load_global
+  | Op_store_global
+  | Op_add
+  | Op_sub
+  | Op_mul
+  | Op_div
+  | Op_mod
+  | Op_add_f
+  | Op_sub_f
+  | Op_mul_f
+  | Op_div_f
+  | Op_neg
+  | Op_neg_f
+  | Op_not
+  | Op_eq
+  | Op_ne
+  | Op_lt
+  | Op_le
+  | Op_gt
+  | Op_ge
+  | Op_eq_f
+  | Op_ne_f
+  | Op_lt_f
+  | Op_le_f
+  | Op_gt_f
+  | Op_ge_f
+  | Op_and
+  | Op_or
+  | Op_jump
+  | Op_jump_if
+  | Op_jump_if_not
+  | Op_switch
+  | Op_call
+  | Op_call_closure
+  | Op_tail_call
+  | Op_tail_call_closure
+  | Op_ret
+  | Op_ret_void
+  | Op_alloc_tuple
+  | Op_alloc_adt
+  | Op_alloc_closure
+  | Op_get_field
+  | Op_set_field
+  | Op_get_tag
+  | Op_tuple_get
+  | Op_cons
+  | Op_car
+  | Op_cdr
+  | Op_gc_safepoint
+  | Op_print
+  | Op_print_int
+  | Op_print_string
+  | Op_print_bool
+  | Op_halt
+
+type instr = {
+  op : op;
+  a : int;
+  b : int;
+  c : int;
+  extra : int array;
+}
+
+let op_to_int = function
+  | Op_nop -> 0
+  | Op_load_const -> 1
+  | Op_move -> 2
+  | Op_load_global -> 3
+  | Op_store_global -> 4
+  | Op_add -> 5
+  | Op_sub -> 6
+  | Op_mul -> 7
+  | Op_div -> 8
+  | Op_mod -> 9
+  | Op_add_f -> 10
+  | Op_sub_f -> 11
+  | Op_mul_f -> 12
+  | Op_div_f -> 13
+  | Op_neg -> 14
+  | Op_neg_f -> 15
+  | Op_not -> 16
+  | Op_eq -> 17
+  | Op_ne -> 18
+  | Op_lt -> 19
+  | Op_le -> 20
+  | Op_gt -> 21
+  | Op_ge -> 22
+  | Op_eq_f -> 23
+  | Op_ne_f -> 24
+  | Op_lt_f -> 25
+  | Op_le_f -> 26
+  | Op_gt_f -> 27
+  | Op_ge_f -> 28
+  | Op_and -> 29
+  | Op_or -> 30
+  | Op_jump -> 31
+  | Op_jump_if -> 32
+  | Op_jump_if_not -> 33
+  | Op_switch -> 34
+  | Op_call -> 35
+  | Op_call_closure -> 36
+  | Op_tail_call -> 37
+  | Op_tail_call_closure -> 38
+  | Op_ret -> 39
+  | Op_ret_void -> 40
+  | Op_alloc_tuple -> 41
+  | Op_alloc_adt -> 42
+  | Op_alloc_closure -> 43
+  | Op_get_field -> 44
+  | Op_set_field -> 45
+  | Op_get_tag -> 46
+  | Op_tuple_get -> 47
+  | Op_cons -> 48
+  | Op_car -> 49
+  | Op_cdr -> 50
+  | Op_gc_safepoint -> 51
+  | Op_print -> 52
+  | Op_print_int -> 53
+  | Op_print_string -> 54
+  | Op_print_bool -> 55
+  | Op_halt -> 56
+
+let op_of_int = function
+  | 0 -> Op_nop
+  | 1 -> Op_load_const
+  | 2 -> Op_move
+  | 3 -> Op_load_global
+  | 4 -> Op_store_global
+  | 5 -> Op_add
+  | 6 -> Op_sub
+  | 7 -> Op_mul
+  | 8 -> Op_div
+  | 9 -> Op_mod
+  | 10 -> Op_add_f
+  | 11 -> Op_sub_f
+  | 12 -> Op_mul_f
+  | 13 -> Op_div_f
+  | 14 -> Op_neg
+  | 15 -> Op_neg_f
+  | 16 -> Op_not
+  | 17 -> Op_eq
+  | 18 -> Op_ne
+  | 19 -> Op_lt
+  | 20 -> Op_le
+  | 21 -> Op_gt
+  | 22 -> Op_ge
+  | 23 -> Op_eq_f
+  | 24 -> Op_ne_f
+  | 25 -> Op_lt_f
+  | 26 -> Op_le_f
+  | 27 -> Op_gt_f
+  | 28 -> Op_ge_f
+  | 29 -> Op_and
+  | 30 -> Op_or
+  | 31 -> Op_jump
+  | 32 -> Op_jump_if
+  | 33 -> Op_jump_if_not
+  | 34 -> Op_switch
+  | 35 -> Op_call
+  | 36 -> Op_call_closure
+  | 37 -> Op_tail_call
+  | 38 -> Op_tail_call_closure
+  | 39 -> Op_ret
+  | 40 -> Op_ret_void
+  | 41 -> Op_alloc_tuple
+  | 42 -> Op_alloc_adt
+  | 43 -> Op_alloc_closure
+  | 44 -> Op_get_field
+  | 45 -> Op_set_field
+  | 46 -> Op_get_tag
+  | 47 -> Op_tuple_get
+  | 48 -> Op_cons
+  | 49 -> Op_car
+  | 50 -> Op_cdr
+  | 51 -> Op_gc_safepoint
+  | 52 -> Op_print
+  | 53 -> Op_print_int
+  | 54 -> Op_print_string
+  | 55 -> Op_print_bool
+  | 56 -> Op_halt
+  | n -> invalid_arg (Printf.sprintf "Opcode.op_of_int: unknown %d" n)
+
+let op_name = function
+  | Op_nop -> "nop"
+  | Op_load_const -> "load_const"
+  | Op_move -> "move"
+  | Op_load_global -> "load_global"
+  | Op_store_global -> "store_global"
+  | Op_add -> "add"
+  | Op_sub -> "sub"
+  | Op_mul -> "mul"
+  | Op_div -> "div"
+  | Op_mod -> "mod"
+  | Op_add_f -> "add_f"
+  | Op_sub_f -> "sub_f"
+  | Op_mul_f -> "mul_f"
+  | Op_div_f -> "div_f"
+  | Op_neg -> "neg"
+  | Op_neg_f -> "neg_f"
+  | Op_not -> "not"
+  | Op_eq -> "eq"
+  | Op_ne -> "ne"
+  | Op_lt -> "lt"
+  | Op_le -> "le"
+  | Op_gt -> "gt"
+  | Op_ge -> "ge"
+  | Op_eq_f -> "eq_f"
+  | Op_ne_f -> "ne_f"
+  | Op_lt_f -> "lt_f"
+  | Op_le_f -> "le_f"
+  | Op_gt_f -> "gt_f"
+  | Op_ge_f -> "ge_f"
+  | Op_and -> "and"
+  | Op_or -> "or"
+  | Op_jump -> "jump"
+  | Op_jump_if -> "jump_if"
+  | Op_jump_if_not -> "jump_if_not"
+  | Op_switch -> "switch"
+  | Op_call -> "call"
+  | Op_call_closure -> "call_closure"
+  | Op_tail_call -> "tail_call"
+  | Op_tail_call_closure -> "tail_call_closure"
+  | Op_ret -> "ret"
+  | Op_ret_void -> "ret_void"
+  | Op_alloc_tuple -> "alloc_tuple"
+  | Op_alloc_adt -> "alloc_adt"
+  | Op_alloc_closure -> "alloc_closure"
+  | Op_get_field -> "get_field"
+  | Op_set_field -> "set_field"
+  | Op_get_tag -> "get_tag"
+  | Op_tuple_get -> "tuple_get"
+  | Op_cons -> "cons"
+  | Op_car -> "car"
+  | Op_cdr -> "cdr"
+  | Op_gc_safepoint -> "gc_safepoint"
+  | Op_print -> "print"
+  | Op_print_int -> "print_int"
+  | Op_print_string -> "print_string"
+  | Op_print_bool -> "print_bool"
+  | Op_halt -> "halt"
+
+let op_arity_regs = function
+  | Op_nop | Op_ret_void | Op_gc_safepoint -> 0
+  | Op_jump | Op_ret | Op_print | Op_print_int | Op_print_string
+  | Op_print_bool | Op_halt | Op_neg | Op_neg_f | Op_not | Op_car | Op_cdr
+  | Op_get_tag ->
+      1
+  | Op_load_const | Op_move | Op_load_global | Op_store_global | Op_jump_if
+  | Op_jump_if_not | Op_switch | Op_alloc_tuple | Op_tail_call
+  | Op_tail_call_closure ->
+      2
+  | Op_add | Op_sub | Op_mul | Op_div | Op_mod | Op_add_f | Op_sub_f
+  | Op_mul_f | Op_div_f | Op_eq | Op_ne | Op_lt | Op_le | Op_gt | Op_ge
+  | Op_eq_f | Op_ne_f | Op_lt_f | Op_le_f | Op_gt_f | Op_ge_f | Op_and
+  | Op_or | Op_call | Op_call_closure | Op_alloc_adt | Op_alloc_closure
+  | Op_get_field | Op_set_field | Op_tuple_get | Op_cons ->
+      3
+
+let make ?(a = 0) ?(b = 0) ?(c = 0) ?(extra = [||]) op = { op; a; b; c; extra }
+
+let pp_op fmt op = Format.pp_print_string fmt (op_name op)
+
+let pp_extra fmt arr =
+  if Array.length arr = 0 then ()
+  else (
+    Format.fprintf fmt " [";
+    Array.iteri
+      (fun i x ->
+        if i > 0 then Format.fprintf fmt ", ";
+        Format.fprintf fmt "%d" x)
+      arr;
+    Format.fprintf fmt "]")
+
+let pp_instr fmt (i : instr) =
+  match i.op with
+  | Op_nop | Op_ret_void | Op_gc_safepoint ->
+      Format.fprintf fmt "%s" (op_name i.op)
+  | Op_jump -> Format.fprintf fmt "%s %d" (op_name i.op) i.a
+  | Op_ret | Op_print | Op_print_int | Op_print_string | Op_print_bool ->
+      Format.fprintf fmt "%s r%d" (op_name i.op) i.a
+  | Op_halt ->
+      if i.b <> 0 then Format.fprintf fmt "halt r%d" i.a
+      else Format.fprintf fmt "halt"
+  | Op_load_const ->
+      Format.fprintf fmt "r%d = const[%d]" i.a i.b
+  | Op_move -> Format.fprintf fmt "r%d = r%d" i.a i.b
+  | Op_load_global -> Format.fprintf fmt "r%d = global[%d]" i.a i.b
+  | Op_store_global -> Format.fprintf fmt "global[%d] = r%d" i.a i.b
+  | Op_jump_if -> Format.fprintf fmt "jump_if r%d, %d" i.a i.b
+  | Op_jump_if_not -> Format.fprintf fmt "jump_if_not r%d, %d" i.a i.b
+  | Op_neg | Op_neg_f | Op_not | Op_car | Op_cdr | Op_get_tag ->
+      Format.fprintf fmt "r%d = %s r%d" i.a (op_name i.op) i.b
+  | Op_add | Op_sub | Op_mul | Op_div | Op_mod | Op_add_f | Op_sub_f
+  | Op_mul_f | Op_div_f | Op_eq | Op_ne | Op_lt | Op_le | Op_gt | Op_ge
+  | Op_eq_f | Op_ne_f | Op_lt_f | Op_le_f | Op_gt_f | Op_ge_f | Op_and
+  | Op_or | Op_cons ->
+      Format.fprintf fmt "r%d = r%d %s r%d" i.a i.b (op_name i.op) i.c
+  | Op_get_field | Op_tuple_get ->
+      Format.fprintf fmt "r%d = r%d[%d]" i.a i.b i.c
+  | Op_set_field -> Format.fprintf fmt "r%d[%d] := r%d" i.a i.b i.c
+  | Op_call ->
+      Format.fprintf fmt "r%d = call fn%d/%d" i.a i.b i.c;
+      pp_extra fmt i.extra
+  | Op_call_closure ->
+      Format.fprintf fmt "r%d = callclo r%d/%d" i.a i.b i.c;
+      pp_extra fmt i.extra
+  | Op_tail_call ->
+      Format.fprintf fmt "tailcall fn%d/%d" i.a i.b;
+      pp_extra fmt i.extra
+  | Op_tail_call_closure ->
+      Format.fprintf fmt "tailcallclo r%d/%d" i.a i.b;
+      pp_extra fmt i.extra
+  | Op_alloc_tuple ->
+      Format.fprintf fmt "r%d = tuple/%d" i.a i.b;
+      pp_extra fmt i.extra
+  | Op_alloc_adt ->
+      Format.fprintf fmt "r%d = adt tag=%d/%d" i.a i.b i.c;
+      pp_extra fmt i.extra
+  | Op_alloc_closure ->
+      Format.fprintf fmt "r%d = closure fn%d/%d" i.a i.b i.c;
+      pp_extra fmt i.extra
+  | Op_switch ->
+      Format.fprintf fmt "switch r%d, %d cases" i.a i.b;
+      pp_extra fmt i.extra
+
+(* Binary layout per instruction:
+     u8  op
+     u8  n_extra
+     u16 a
+     u16 b
+     u16 c
+     u16 extra[n_extra]
 *)
 
-type reg = int
-type const_idx = int
-type proto_id = int
-type offset = int
+let encode (i : instr) =
+  let n = Array.length i.extra in
+  let buf = Bytes.create (8 + (2 * n)) in
+  Bytes.set_uint8 buf 0 (op_to_int i.op);
+  Bytes.set_uint8 buf 1 n;
+  Bytes.set_uint16_le buf 2 i.a;
+  Bytes.set_uint16_le buf 4 i.b;
+  Bytes.set_uint16_le buf 6 i.c;
+  Array.iteri
+    (fun idx v -> Bytes.set_uint16_le buf (8 + (2 * idx)) v)
+    i.extra;
+  buf
 
-type opcode =
-  (* Moves / constants *)
-  | LoadConst of reg * const_idx
-  | Move of reg * reg
-  (* Integer arithmetic *)
-  | Add of reg * reg * reg
-  | Sub of reg * reg * reg
-  | Mul of reg * reg * reg
-  | Div of reg * reg * reg
-  | Mod of reg * reg * reg
-  | Neg of reg * reg
-  (* Float arithmetic *)
-  | AddF of reg * reg * reg
-  | SubF of reg * reg * reg
-  | MulF of reg * reg * reg
-  | DivF of reg * reg * reg
-  | NegF of reg * reg
-  (* Comparisons → bool in dst *)
-  | Eq of reg * reg * reg
-  | Ne of reg * reg * reg
-  | Lt of reg * reg * reg
-  | Le of reg * reg * reg
-  | Gt of reg * reg * reg
-  | Ge of reg * reg * reg
-  | EqF of reg * reg * reg
-  | NeF of reg * reg * reg
-  | LtF of reg * reg * reg
-  | LeF of reg * reg * reg
-  | GtF of reg * reg * reg
-  | GeF of reg * reg * reg
-  (* Boolean *)
-  | And of reg * reg * reg
-  | Or of reg * reg * reg
-  | Not of reg * reg
-  (* Control flow — offsets are absolute instruction indices *)
-  | Jump of offset
-  | JumpIf of reg * offset
-  | JumpIfNot of reg * offset
-  | Switch of reg * offset list * offset
-      (** [Switch (scrutinee, case_targets, default)] — scrutinee is int tag. *)
-  (* Calls *)
-  | Call of reg * proto_id * reg list
-      (** [Call (dst, proto, args)] *)
-  | TailCall of proto_id * reg list
-  | CallClosure of reg * reg * reg list
-      (** [CallClosure (dst, clo_reg, args)] *)
-  | TailCallClosure of reg * reg list
-  | Ret of reg option
-  (* Heap *)
-  | Alloc of reg * int * int
-      (** [Alloc (dst, tag, nfields)] — fields filled via subsequent SetField
-          or loaded from consecutive arg regs by the emitter convention:
-          fields are in registers [dst+1 ..] is NOT used; emitter emits
-          Alloc then SetField. For efficiency we also support AllocArgs. *)
-  | AllocArgs of reg * int * reg list
-      (** Allocate ADT/tuple with tag and field registers. *)
-  | GetField of reg * reg * int
-  | SetField of reg * int * reg
-  | MakeClosure of reg * proto_id * reg list
-  | TupleGet of reg * reg * int
-  (* List-style ops (cons cell = ADT tag 1 with 2 fields) *)
-  | Cons of reg * reg * reg
-  | Car of reg * reg
-  | Cdr of reg * reg
-  (* Misc *)
-  | Print of reg
-  | Halt of reg option
-  | Nop
-
-(* -------------------------------------------------------------------------- *)
-(* Opcode tags for encoding                                                   *)
-(* -------------------------------------------------------------------------- *)
-
-let tag_of = function
-  | LoadConst _ -> 1
-  | Move _ -> 2
-  | Add _ -> 3
-  | Sub _ -> 4
-  | Mul _ -> 5
-  | Div _ -> 6
-  | Mod _ -> 7
-  | Neg _ -> 8
-  | AddF _ -> 9
-  | SubF _ -> 10
-  | MulF _ -> 11
-  | DivF _ -> 12
-  | NegF _ -> 13
-  | Eq _ -> 14
-  | Ne _ -> 15
-  | Lt _ -> 16
-  | Le _ -> 17
-  | Gt _ -> 18
-  | Ge _ -> 19
-  | EqF _ -> 20
-  | NeF _ -> 21
-  | LtF _ -> 22
-  | LeF _ -> 23
-  | GtF _ -> 24
-  | GeF _ -> 25
-  | And _ -> 26
-  | Or _ -> 27
-  | Not _ -> 28
-  | Jump _ -> 29
-  | JumpIf _ -> 30
-  | JumpIfNot _ -> 31
-  | Switch _ -> 32
-  | Call _ -> 33
-  | TailCall _ -> 34
-  | CallClosure _ -> 35
-  | TailCallClosure _ -> 36
-  | Ret _ -> 37
-  | Alloc _ -> 38
-  | AllocArgs _ -> 39
-  | GetField _ -> 40
-  | SetField _ -> 41
-  | MakeClosure _ -> 42
-  | TupleGet _ -> 43
-  | Cons _ -> 44
-  | Car _ -> 45
-  | Cdr _ -> 46
-  | Print _ -> 47
-  | Halt _ -> 48
-  | Nop -> 49
-
-let name_of_tag = function
-  | 1 -> "LoadConst"
-  | 2 -> "Move"
-  | 3 -> "Add"
-  | 4 -> "Sub"
-  | 5 -> "Mul"
-  | 6 -> "Div"
-  | 7 -> "Mod"
-  | 8 -> "Neg"
-  | 9 -> "AddF"
-  | 10 -> "SubF"
-  | 11 -> "MulF"
-  | 12 -> "DivF"
-  | 13 -> "NegF"
-  | 14 -> "Eq"
-  | 15 -> "Ne"
-  | 16 -> "Lt"
-  | 17 -> "Le"
-  | 18 -> "Gt"
-  | 19 -> "Ge"
-  | 20 -> "EqF"
-  | 21 -> "NeF"
-  | 22 -> "LtF"
-  | 23 -> "LeF"
-  | 24 -> "GtF"
-  | 25 -> "GeF"
-  | 26 -> "And"
-  | 27 -> "Or"
-  | 28 -> "Not"
-  | 29 -> "Jump"
-  | 30 -> "JumpIf"
-  | 31 -> "JumpIfNot"
-  | 32 -> "Switch"
-  | 33 -> "Call"
-  | 34 -> "TailCall"
-  | 35 -> "CallClosure"
-  | 36 -> "TailCallClosure"
-  | 37 -> "Ret"
-  | 38 -> "Alloc"
-  | 39 -> "AllocArgs"
-  | 40 -> "GetField"
-  | 41 -> "SetField"
-  | 42 -> "MakeClosure"
-  | 43 -> "TupleGet"
-  | 44 -> "Cons"
-  | 45 -> "Car"
-  | 46 -> "Cdr"
-  | 47 -> "Print"
-  | 48 -> "Halt"
-  | 49 -> "Nop"
-  | n -> Printf.sprintf "Unknown(%d)" n
-
-let name_of op = name_of_tag (tag_of op)
-
-(* Packing helpers: word0 = tag | a<<8 | b<<16 | c<<24 (each field 8 bits).
-   Wider immediates and register lists follow as extra int32 words. *)
-
-let pack3 tag a b c : int32 =
-  Int32.(
-    logor
-      (of_int (tag land 0xff))
-      (logor
-         (shift_left (of_int (a land 0xff)) 8)
-         (logor
-            (shift_left (of_int (b land 0xff)) 16)
-            (shift_left (of_int (c land 0xff)) 24))))
-
-let pack2 tag a b = pack3 tag a b 0
-let pack1 tag a = pack3 tag a 0 0
-let pack0 tag = pack3 tag 0 0 0
-
-let unpack_tag (w : int32) = Int32.to_int w land 0xff
-let unpack_a w = Int32.(to_int (shift_right_logical w 8) land 0xff)
-let unpack_b w = Int32.(to_int (shift_right_logical w 16) land 0xff)
-let unpack_c w = Int32.(to_int (shift_right_logical w 24) land 0xff)
-
-let i32 n = Int32.of_int n
-let of_i32 w = Int32.to_int w
-
-(** Encode one opcode to a list of int32 words (length ≥ 1). *)
-let encode (op : opcode) : int32 list =
-  let regs_words regs =
-    let n = List.length regs in
-    i32 n :: List.map i32 regs
-  in
-  match op with
-  | LoadConst (dst, ci) -> [ pack2 1 dst (ci land 0xff); i32 ci ]
-  | Move (dst, src) -> [ pack2 2 dst src ]
-  | Add (d, a, b) -> [ pack3 3 d a b ]
-  | Sub (d, a, b) -> [ pack3 4 d a b ]
-  | Mul (d, a, b) -> [ pack3 5 d a b ]
-  | Div (d, a, b) -> [ pack3 6 d a b ]
-  | Mod (d, a, b) -> [ pack3 7 d a b ]
-  | Neg (d, a) -> [ pack2 8 d a ]
-  | AddF (d, a, b) -> [ pack3 9 d a b ]
-  | SubF (d, a, b) -> [ pack3 10 d a b ]
-  | MulF (d, a, b) -> [ pack3 11 d a b ]
-  | DivF (d, a, b) -> [ pack3 12 d a b ]
-  | NegF (d, a) -> [ pack2 13 d a ]
-  | Eq (d, a, b) -> [ pack3 14 d a b ]
-  | Ne (d, a, b) -> [ pack3 15 d a b ]
-  | Lt (d, a, b) -> [ pack3 16 d a b ]
-  | Le (d, a, b) -> [ pack3 17 d a b ]
-  | Gt (d, a, b) -> [ pack3 18 d a b ]
-  | Ge (d, a, b) -> [ pack3 19 d a b ]
-  | EqF (d, a, b) -> [ pack3 20 d a b ]
-  | NeF (d, a, b) -> [ pack3 21 d a b ]
-  | LtF (d, a, b) -> [ pack3 22 d a b ]
-  | LeF (d, a, b) -> [ pack3 23 d a b ]
-  | GtF (d, a, b) -> [ pack3 24 d a b ]
-  | GeF (d, a, b) -> [ pack3 25 d a b ]
-  | And (d, a, b) -> [ pack3 26 d a b ]
-  | Or (d, a, b) -> [ pack3 27 d a b ]
-  | Not (d, a) -> [ pack2 28 d a ]
-  | Jump off -> [ pack0 29; i32 off ]
-  | JumpIf (r, off) -> [ pack1 30 r; i32 off ]
-  | JumpIfNot (r, off) -> [ pack1 31 r; i32 off ]
-  | Switch (r, cases, def) ->
-      pack1 32 r :: i32 (List.length cases) :: i32 def
-      :: List.map i32 cases
-  | Call (dst, proto, args) ->
-      pack2 33 dst (proto land 0xff) :: i32 proto :: regs_words args
-  | TailCall (proto, args) ->
-      pack1 34 (proto land 0xff) :: i32 proto :: regs_words args
-  | CallClosure (dst, clo, args) ->
-      pack2 35 dst clo :: regs_words args
-  | TailCallClosure (clo, args) -> pack1 36 clo :: regs_words args
-  | Ret None -> [ pack1 37 0 ]
-  | Ret (Some r) -> [ pack2 37 1 r ]
-  | Alloc (dst, tag, n) -> [ pack3 38 dst (tag land 0xff) (n land 0xff); i32 tag; i32 n ]
-  | AllocArgs (dst, tag, fields) ->
-      pack2 39 dst (tag land 0xff) :: i32 tag :: regs_words fields
-  | GetField (dst, obj, i) -> [ pack3 40 dst obj i ]
-  | SetField (obj, i, v) -> [ pack3 41 obj i v ]
-  | MakeClosure (dst, proto, env) ->
-      pack2 42 dst (proto land 0xff) :: i32 proto :: regs_words env
-  | TupleGet (dst, tup, i) -> [ pack3 43 dst tup i ]
-  | Cons (dst, h, t) -> [ pack3 44 dst h t ]
-  | Car (dst, c) -> [ pack2 45 dst c ]
-  | Cdr (dst, c) -> [ pack2 46 dst c ]
-  | Print r -> [ pack1 47 r ]
-  | Halt None -> [ pack1 48 0 ]
-  | Halt (Some r) -> [ pack2 48 1 r ]
-  | Nop -> [ pack0 49 ]
-
-(** Decode one opcode starting at [words.(idx)]. Returns [(opcode, next_idx)]. *)
-let decode_at (words : int32 array) (idx : int) : opcode * int =
-  let w = words.(idx) in
-  let tag = unpack_tag w in
-  let a = unpack_a w in
-  let b = unpack_b w in
-  let c = unpack_c w in
-  let get i = of_i32 words.(idx + i) in
-  let read_regs start =
-    let n = get start in
-    let rec loop i acc =
-      if i >= n then List.rev acc
-      else loop (i + 1) (get (start + 1 + i) :: acc)
-    in
-    (loop 0 [], start + 1 + n)
-  in
-  match tag with
-  | 1 -> (LoadConst (a, get 1), idx + 2)
-  | 2 -> (Move (a, b), idx + 1)
-  | 3 -> (Add (a, b, c), idx + 1)
-  | 4 -> (Sub (a, b, c), idx + 1)
-  | 5 -> (Mul (a, b, c), idx + 1)
-  | 6 -> (Div (a, b, c), idx + 1)
-  | 7 -> (Mod (a, b, c), idx + 1)
-  | 8 -> (Neg (a, b), idx + 1)
-  | 9 -> (AddF (a, b, c), idx + 1)
-  | 10 -> (SubF (a, b, c), idx + 1)
-  | 11 -> (MulF (a, b, c), idx + 1)
-  | 12 -> (DivF (a, b, c), idx + 1)
-  | 13 -> (NegF (a, b), idx + 1)
-  | 14 -> (Eq (a, b, c), idx + 1)
-  | 15 -> (Ne (a, b, c), idx + 1)
-  | 16 -> (Lt (a, b, c), idx + 1)
-  | 17 -> (Le (a, b, c), idx + 1)
-  | 18 -> (Gt (a, b, c), idx + 1)
-  | 19 -> (Ge (a, b, c), idx + 1)
-  | 20 -> (EqF (a, b, c), idx + 1)
-  | 21 -> (NeF (a, b, c), idx + 1)
-  | 22 -> (LtF (a, b, c), idx + 1)
-  | 23 -> (LeF (a, b, c), idx + 1)
-  | 24 -> (GtF (a, b, c), idx + 1)
-  | 25 -> (GeF (a, b, c), idx + 1)
-  | 26 -> (And (a, b, c), idx + 1)
-  | 27 -> (Or (a, b, c), idx + 1)
-  | 28 -> (Not (a, b), idx + 1)
-  | 29 -> (Jump (get 1), idx + 2)
-  | 30 -> (JumpIf (a, get 1), idx + 2)
-  | 31 -> (JumpIfNot (a, get 1), idx + 2)
-  | 32 ->
-      let ncases = get 1 in
-      let def = get 2 in
-      let rec cases i acc =
-        if i >= ncases then List.rev acc
-        else cases (i + 1) (get (3 + i) :: acc)
-      in
-      (Switch (a, cases 0 [], def), idx + 3 + ncases)
-  | 33 ->
-      let proto = get 1 in
-      let args, next = read_regs 2 in
-      (Call (a, proto, args), idx + next)
-  | 34 ->
-      let proto = get 1 in
-      let args, next = read_regs 2 in
-      (TailCall (proto, args), idx + next)
-  | 35 ->
-      let args, next = read_regs 1 in
-      (CallClosure (a, b, args), idx + next)
-  | 36 ->
-      let args, next = read_regs 1 in
-      (TailCallClosure (a, args), idx + next)
-  | 37 ->
-      if a = 0 then (Ret None, idx + 1) else (Ret (Some b), idx + 1)
-  | 38 -> (Alloc (a, get 1, get 2), idx + 3)
-  | 39 ->
-      let tag = get 1 in
-      let fields, next = read_regs 2 in
-      (AllocArgs (a, tag, fields), idx + next)
-  | 40 -> (GetField (a, b, c), idx + 1)
-  | 41 -> (SetField (a, b, c), idx + 1)
-  | 42 ->
-      let proto = get 1 in
-      let env, next = read_regs 2 in
-      (MakeClosure (a, proto, env), idx + next)
-  | 43 -> (TupleGet (a, b, c), idx + 1)
-  | 44 -> (Cons (a, b, c), idx + 1)
-  | 45 -> (Car (a, b), idx + 1)
-  | 46 -> (Cdr (a, b), idx + 1)
-  | 47 -> (Print a, idx + 1)
-  | 48 ->
-      if a = 0 then (Halt None, idx + 1) else (Halt (Some b), idx + 1)
-  | 49 -> (Nop, idx + 1)
-  | t -> failwith (Printf.sprintf "Opcode.decode: bad tag %d at %d" t idx)
-
-let decode_all (words : int32 array) : opcode array =
-  let out = ref [] in
-  let i = ref 0 in
-  let n = Array.length words in
-  while !i < n do
-    let op, next = decode_at words !i in
-    out := op :: !out;
-    i := next
-  done;
-  Array.of_list (List.rev !out)
-
-let encode_all (ops : opcode array) : int32 array =
-  Array.to_list ops |> List.concat_map encode |> Array.of_list
-
-let encoded_size op = List.length (encode op)
-
-(* -------------------------------------------------------------------------- *)
-(* Pretty-printing                                                            *)
-(* -------------------------------------------------------------------------- *)
-
-let pp_reg fmt r = Format.fprintf fmt "r%d" r
-
-let pp_regs fmt regs =
-  Format.fprintf fmt "[%a]"
-    (Format.pp_print_list
-       ~pp_sep:(fun f () -> Format.fprintf f ", ")
-       pp_reg)
-    regs
-
-let pp_opcode fmt op =
-  match op with
-  | LoadConst (d, ci) ->
-      Format.fprintf fmt "LoadConst %a, const[%d]" pp_reg d ci
-  | Move (d, s) -> Format.fprintf fmt "Move %a, %a" pp_reg d pp_reg s
-  | Add (d, a, b) ->
-      Format.fprintf fmt "Add %a, %a, %a" pp_reg d pp_reg a pp_reg b
-  | Sub (d, a, b) ->
-      Format.fprintf fmt "Sub %a, %a, %a" pp_reg d pp_reg a pp_reg b
-  | Mul (d, a, b) ->
-      Format.fprintf fmt "Mul %a, %a, %a" pp_reg d pp_reg a pp_reg b
-  | Div (d, a, b) ->
-      Format.fprintf fmt "Div %a, %a, %a" pp_reg d pp_reg a pp_reg b
-  | Mod (d, a, b) ->
-      Format.fprintf fmt "Mod %a, %a, %a" pp_reg d pp_reg a pp_reg b
-  | Neg (d, a) -> Format.fprintf fmt "Neg %a, %a" pp_reg d pp_reg a
-  | AddF (d, a, b) ->
-      Format.fprintf fmt "AddF %a, %a, %a" pp_reg d pp_reg a pp_reg b
-  | SubF (d, a, b) ->
-      Format.fprintf fmt "SubF %a, %a, %a" pp_reg d pp_reg a pp_reg b
-  | MulF (d, a, b) ->
-      Format.fprintf fmt "MulF %a, %a, %a" pp_reg d pp_reg a pp_reg b
-  | DivF (d, a, b) ->
-      Format.fprintf fmt "DivF %a, %a, %a" pp_reg d pp_reg a pp_reg b
-  | NegF (d, a) -> Format.fprintf fmt "NegF %a, %a" pp_reg d pp_reg a
-  | Eq (d, a, b) ->
-      Format.fprintf fmt "Eq %a, %a, %a" pp_reg d pp_reg a pp_reg b
-  | Ne (d, a, b) ->
-      Format.fprintf fmt "Ne %a, %a, %a" pp_reg d pp_reg a pp_reg b
-  | Lt (d, a, b) ->
-      Format.fprintf fmt "Lt %a, %a, %a" pp_reg d pp_reg a pp_reg b
-  | Le (d, a, b) ->
-      Format.fprintf fmt "Le %a, %a, %a" pp_reg d pp_reg a pp_reg b
-  | Gt (d, a, b) ->
-      Format.fprintf fmt "Gt %a, %a, %a" pp_reg d pp_reg a pp_reg b
-  | Ge (d, a, b) ->
-      Format.fprintf fmt "Ge %a, %a, %a" pp_reg d pp_reg a pp_reg b
-  | EqF (d, a, b) ->
-      Format.fprintf fmt "EqF %a, %a, %a" pp_reg d pp_reg a pp_reg b
-  | NeF (d, a, b) ->
-      Format.fprintf fmt "NeF %a, %a, %a" pp_reg d pp_reg a pp_reg b
-  | LtF (d, a, b) ->
-      Format.fprintf fmt "LtF %a, %a, %a" pp_reg d pp_reg a pp_reg b
-  | LeF (d, a, b) ->
-      Format.fprintf fmt "LeF %a, %a, %a" pp_reg d pp_reg a pp_reg b
-  | GtF (d, a, b) ->
-      Format.fprintf fmt "GtF %a, %a, %a" pp_reg d pp_reg a pp_reg b
-  | GeF (d, a, b) ->
-      Format.fprintf fmt "GeF %a, %a, %a" pp_reg d pp_reg a pp_reg b
-  | And (d, a, b) ->
-      Format.fprintf fmt "And %a, %a, %a" pp_reg d pp_reg a pp_reg b
-  | Or (d, a, b) ->
-      Format.fprintf fmt "Or %a, %a, %a" pp_reg d pp_reg a pp_reg b
-  | Not (d, a) -> Format.fprintf fmt "Not %a, %a" pp_reg d pp_reg a
-  | Jump off -> Format.fprintf fmt "Jump %d" off
-  | JumpIf (r, off) -> Format.fprintf fmt "JumpIf %a, %d" pp_reg r off
-  | JumpIfNot (r, off) ->
-      Format.fprintf fmt "JumpIfNot %a, %d" pp_reg r off
-  | Switch (r, cases, def) ->
-      Format.fprintf fmt "Switch %a, cases=[" pp_reg r;
-      List.iteri
-        (fun i t ->
-          if i > 0 then Format.fprintf fmt ", ";
-          Format.fprintf fmt "%d" t)
-        cases;
-      Format.fprintf fmt "], default=%d" def
-  | Call (d, p, args) ->
-      Format.fprintf fmt "Call %a, proto%d %a" pp_reg d p pp_regs args
-  | TailCall (p, args) ->
-      Format.fprintf fmt "TailCall proto%d %a" p pp_regs args
-  | CallClosure (d, clo, args) ->
-      Format.fprintf fmt "CallClosure %a, %a %a" pp_reg d pp_reg clo
-        pp_regs args
-  | TailCallClosure (clo, args) ->
-      Format.fprintf fmt "TailCallClosure %a %a" pp_reg clo pp_regs args
-  | Ret None -> Format.fprintf fmt "Ret"
-  | Ret (Some r) -> Format.fprintf fmt "Ret %a" pp_reg r
-  | Alloc (d, tag, n) ->
-      Format.fprintf fmt "Alloc %a, tag=%d, n=%d" pp_reg d tag n
-  | AllocArgs (d, tag, fields) ->
-      Format.fprintf fmt "AllocArgs %a, tag=%d %a" pp_reg d tag pp_regs
-        fields
-  | GetField (d, obj, i) ->
-      Format.fprintf fmt "GetField %a, %a, %d" pp_reg d pp_reg obj i
-  | SetField (obj, i, v) ->
-      Format.fprintf fmt "SetField %a, %d, %a" pp_reg obj i pp_reg v
-  | MakeClosure (d, p, env) ->
-      Format.fprintf fmt "MakeClosure %a, proto%d %a" pp_reg d p pp_regs
-        env
-  | TupleGet (d, t, i) ->
-      Format.fprintf fmt "TupleGet %a, %a, %d" pp_reg d pp_reg t i
-  | Cons (d, h, t) ->
-      Format.fprintf fmt "Cons %a, %a, %a" pp_reg d pp_reg h pp_reg t
-  | Car (d, c) -> Format.fprintf fmt "Car %a, %a" pp_reg d pp_reg c
-  | Cdr (d, c) -> Format.fprintf fmt "Cdr %a, %a" pp_reg d pp_reg c
-  | Print r -> Format.fprintf fmt "Print %a" pp_reg r
-  | Halt None -> Format.fprintf fmt "Halt"
-  | Halt (Some r) -> Format.fprintf fmt "Halt %a" pp_reg r
-  | Nop -> Format.fprintf fmt "Nop"
-
-let to_string op =
-  Format.asprintf "%a" pp_opcode op
-
-(** Whether this opcode transfers control and does not fall through. *)
-let is_terminator = function
-  | Jump _ | Switch _ | TailCall _ | TailCallClosure _ | Ret _ | Halt _
-    ->
-      true
-  | JumpIf _ | JumpIfNot _ -> false
-  | _ -> false
-
-let max_reg_used op =
-  let m = ref (-1) in
-  let touch r = if r > !m then m := r in
-  let touches = List.iter touch in
-  (match op with
-  | LoadConst (d, _) | Neg (d, _) | NegF (d, _) | Not (d, _) | Print d
-  | JumpIf (d, _) | JumpIfNot (d, _) | Car (d, _) | Cdr (d, _)
-  | Alloc (d, _, _) | Switch (d, _, _) ->
-      touch d
-  | Move (d, s) | GetField (d, s, _) | TupleGet (d, s, _) ->
-      touch d;
-      touch s
-  | Add (d, a, b)
-  | Sub (d, a, b)
-  | Mul (d, a, b)
-  | Div (d, a, b)
-  | Mod (d, a, b)
-  | AddF (d, a, b)
-  | SubF (d, a, b)
-  | MulF (d, a, b)
-  | DivF (d, a, b)
-  | Eq (d, a, b)
-  | Ne (d, a, b)
-  | Lt (d, a, b)
-  | Le (d, a, b)
-  | Gt (d, a, b)
-  | Ge (d, a, b)
-  | EqF (d, a, b)
-  | NeF (d, a, b)
-  | LtF (d, a, b)
-  | LeF (d, a, b)
-  | GtF (d, a, b)
-  | GeF (d, a, b)
-  | And (d, a, b)
-  | Or (d, a, b)
-  | Cons (d, a, b)
-  | SetField (d, _, b) ->
-      touch d;
-      touch a;
-      touch b
-  | Call (d, _, args) | CallClosure (d, _, args) | AllocArgs (d, _, args)
-  | MakeClosure (d, _, args) ->
-      touch d;
-      touches args
-  | CallClosure (_, clo, _) as _ when false -> ()
-  | CallClosure _ -> () (* handled above *)
-  | TailCall (_, args) | TailCallClosure (_, args) -> touches args
-  | TailCallClosure (clo, args) ->
-      touch clo;
-      touches args
-  | Ret (Some r) | Halt (Some r) -> touch r
-  | Ret None | Halt None | Jump _ | Nop -> ()
-  | GetField _ | TupleGet _ | Move _ | LoadConst _ | Neg _ | NegF _
-  | Not _ | Print _ | JumpIf _ | JumpIfNot _ | Car _ | Cdr _ | Alloc _
-  | Switch _ | Add _ | Sub _ | Mul _ | Div _ | Mod _ | AddF _ | SubF _
-  | MulF _ | DivF _ | Eq _ | Ne _ | Lt _ | Le _ | Gt _ | Ge _ | EqF _
-  | NeF _ | LtF _ | LeF _ | GtF _ | GeF _ | And _ | Or _ | Cons _
-  | SetField _ | Call _ | CallClosure _ | AllocArgs _ | MakeClosure _
-    ->
-      () (* exhaustiveness for already-handled *; keep compiler quiet *));
-  (* Re-do cleanly without the broken match: *)
-  m := -1;
-  (match op with
-  | LoadConst (d, _) -> touch d
-  | Move (d, s) ->
-      touch d;
-      touch s
-  | Add (d, a, b)
-  | Sub (d, a, b)
-  | Mul (d, a, b)
-  | Div (d, a, b)
-  | Mod (d, a, b)
-  | AddF (d, a, b)
-  | SubF (d, a, b)
-  | MulF (d, a, b)
-  | DivF (d, a, b)
-  | Eq (d, a, b)
-  | Ne (d, a, b)
-  | Lt (d, a, b)
-  | Le (d, a, b)
-  | Gt (d, a, b)
-  | Ge (d, a, b)
-  | EqF (d, a, b)
-  | NeF (d, a, b)
-  | LtF (d, a, b)
-  | LeF (d, a, b)
-  | GtF (d, a, b)
-  | GeF (d, a, b)
-  | And (d, a, b)
-  | Or (d, a, b)
-  | Cons (d, a, b) ->
-      touch d;
-      touch a;
-      touch b
-  | Neg (d, a) | NegF (d, a) | Not (d, a) | Car (d, a) | Cdr (d, a) ->
-      touch d;
-      touch a
-  | JumpIf (r, _) | JumpIfNot (r, _) | Print r | Switch (r, _, _) ->
-      touch r
-  | Jump _ | Nop -> ()
-  | Call (d, _, args) ->
-      touch d;
-      touches args
-  | TailCall (_, args) -> touches args
-  | CallClosure (d, clo, args) ->
-      touch d;
-      touch clo;
-      touches args
-  | TailCallClosure (clo, args) ->
-      touch clo;
-      touches args
-  | Ret (Some r) | Halt (Some r) -> touch r
-  | Ret None | Halt None -> ()
-  | Alloc (d, _, _) -> touch d
-  | AllocArgs (d, _, fields) ->
-      touch d;
-      touches fields
-  | GetField (d, obj, _) | TupleGet (d, obj, _) ->
-      touch d;
-      touch obj
-  | SetField (obj, _, v) ->
-      touch obj;
-      touch v
-  | MakeClosure (d, _, env) ->
-      touch d;
-      touches env);
-  !m
+let decode buf off =
+  let op = op_of_int (Bytes.get_uint8 buf off) in
+  let n = Bytes.get_uint8 buf (off + 1) in
+  let a = Bytes.get_uint16_le buf (off + 2) in
+  let b = Bytes.get_uint16_le buf (off + 4) in
+  let c = Bytes.get_uint16_le buf (off + 6) in
+  let extra = Array.init n (fun i -> Bytes.get_uint16_le buf (off + 8 + (2 * i))) in
+  ({ op; a; b; c; extra }, off + 8 + (2 * n))

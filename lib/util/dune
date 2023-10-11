@@ -1,0 +1,5 @@
+(library
+ (name glyph_util)
+ (public_name glyph.util)
+ (libraries unix)
+ (flags (:standard -w +a-4-29-40-41-42-44-45-48-58-59-60)))

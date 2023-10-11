@@ -8,8 +8,7 @@ type 'a t = {
 
 let create () = { front = []; back = []; len = 0 }
 
-let of_list xs =
-  { front = xs; back = []; len = List.length xs }
+let of_list xs = { front = xs; back = []; len = List.length xs }
 
 let clear t =
   t.front <- [];
@@ -52,49 +51,22 @@ let mem t ~equal x =
 
 module Unique = struct
   type ('k, 'a) t = {
-    queue : 'a t;
-    table : ('k, unit) Hashtbl.t;
-    key : 'a -> 'k;
-  }
-
-  let create ~hash ~equal ~key =
-    let module H = Hashtbl.Make (struct
-      type t = 'k
-      let hash = hash
-      let equal = equal
-    end) in
-    ignore (H.create 1);
-    {
-      queue = create ();
-      table = Hashtbl.create 64;
-      key;
-    }
-
-  (* Reimplement with polymorphic hashtable keyed by marshalled — better use
-     the provided hash/equal via a custom table. *)
-end
-
-(* Fix Unique properly without the incomplete module above. *)
-module Unique = struct
-  type ('k, 'a) t = {
     mutable front : 'a list;
     mutable back : 'a list;
     mutable len : int;
     pending : ('k, unit) Hashtbl.t;
     key : 'a -> 'k;
-    hash : 'k -> int;
-    equal : 'k -> 'k -> bool;
   }
 
   let create ~hash ~equal ~key =
+    ignore hash;
+    ignore equal;
     {
       front = [];
       back = [];
       len = 0;
       pending = Hashtbl.create 128;
       key;
-      hash;
-      equal;
     }
 
   let clear t =
@@ -149,8 +121,7 @@ module Int = struct
     in_q : bool array;
   }
 
-  let create ~n =
-    { q = []; len = 0; in_q = Array.make n false }
+  let create ~n = { q = []; len = 0; in_q = Array.make n false }
 
   let clear t =
     List.iter (fun i -> t.in_q.(i) <- false) t.q;
@@ -187,8 +158,7 @@ module Bitset = struct
     mutable len : int;
   }
 
-  let create ~n =
-    { bits = Bitvec.create ~size:n (); q = []; len = 0 }
+  let create ~n = { bits = Bitvec.create ~size:n (); q = []; len = 0 }
 
   let clear t =
     Bitvec.clear t.bits;
