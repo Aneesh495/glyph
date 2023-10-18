@@ -1,8 +1,8 @@
 (** Typing environments: value schemes and algebraic data type constructors. *)
 
-module Ast = Glyph_syntax.Ast
-module Ident = Glyph_util.Ident
-module Span = Glyph_util.Span
+module Ast = Ast
+module Ident = Ident
+module Span = Span
 
 (** Information about a type constructor (ADT, alias, record, …). *)
 type type_ctor = {
