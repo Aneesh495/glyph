@@ -66,7 +66,10 @@ environment; the VM allocates them on the heap and the collector reclaims them.
 | [docs/ir.md](docs/ir.md) | HIR, MIR, SSA / φ nodes, lowering |
 | [docs/vm.md](docs/vm.md) | Bytecode ISA, frames, semi-space GC |
 | [docs/optimizations.md](docs/optimizations.md) | Each opt pass with before/after IR |
-| [docs/diagrams/pipeline.md](docs/diagrams/pipeline.md) | Mermaid diagrams only |
+| [docs/diagrams/pipeline.md](docs/diagrams/pipeline.md) | Mermaid diagrams (full set) |
+| [docs/diagrams/types.md](docs/diagrams/types.md) | Inference / unify sequence |
+| [docs/diagrams/ssa.md](docs/diagrams/ssa.md) | Dominators → φ → rename |
+| [docs/diagrams/gc.md](docs/diagrams/gc.md) | Cheney semi-space GC |
 | [docs/contributing.md](docs/contributing.md) | Build, test, add a pass |
 
 ## Project layout
