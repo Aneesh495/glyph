@@ -116,30 +116,17 @@ type program = {
   span : Span.t;
 }
 
-let lit_to_string = function
-  | Lit_unit -> "()"
-  | Lit_bool b -> if b then "true" else "false"
-  | Lit_int n -> Int64.to_string n
-  | Lit_float f -> string_of_float f
-  | Lit_string s -> Printf.sprintf "%S" s
-  | Lit_char c -> Printf.sprintf "%C" c
+val lit_to_string : lit -> string
+val pp_lit : Format.formatter -> lit -> unit
 
-let pp_lit fmt lit = Format.pp_print_string fmt (lit_to_string lit)
+val ty : ty_desc -> Span.t -> ty
+val pat : pat_desc -> Span.t -> pat
+val expr : expr_desc -> Span.t -> expr
 
-let ty ty_desc ty_span = { ty_desc; ty_span }
-let pat pat_desc pat_span = { pat_desc; pat_span }
-let expr expr_desc expr_span = { expr_desc; expr_span }
+val span_of_item : item -> Span.t
+val is_fn_item : item -> bool
 
-let span_of_item = function
-  | Item_fn lb | Item_let lb -> lb.lb_span
-  | Item_type td -> td.td_span
-  | Item_extern ext -> ext.ext_span
-
-let is_fn_item = function
-  | Item_fn _ -> true
-  | _ -> false
-
-let unit_expr span = expr (Expr_lit Lit_unit) span
-let bool_expr b span = expr (Expr_lit (Lit_bool b)) span
-let int_expr n span = expr (Expr_lit (Lit_int n)) span
-let var_expr id span = expr (Expr_var id) span
+val unit_expr : Span.t -> expr
+val bool_expr : bool -> Span.t -> expr
+val int_expr : int64 -> Span.t -> expr
+val var_expr : Ident.t -> Span.t -> expr
