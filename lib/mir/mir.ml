@@ -238,7 +238,7 @@ type block = {
 
 type func = {
   name : Ident.t;
-  params : (vreg * ty) list;
+  mutable params : (vreg * ty) list;
   mutable blocks : block Label.Map.t;
   entry : label;
   return_ty : ty;
