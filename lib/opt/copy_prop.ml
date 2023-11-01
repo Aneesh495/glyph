@@ -1,82 +1,64 @@
-(** Copy propagation: replace uses of [x] by [y] after [x = y]. *)
+(** Copy propagation on SSA MIR. *)
 
 open Mir
 
-let run_func (ctx : Pass.context) (fn : func) : func =
-  (* In SSA, a copy [d = s] means all uses of [d] can become [s] if [d] is
-     only defined once (always true in SSA) and we update φ operands too. *)
-  let alias : (vreg, vreg) Hashtbl.t = Hashtbl.create fn.n_vregs in
-  let rec resolve v =
-    match Hashtbl.find_opt alias v with
-    | Some v' when v' <> v -> resolve v'
-    | Some v' -> v'
-    | None -> v
-  in
-  List.iter
-    (fun (b : block) ->
-      List.iter
-        (fun i ->
-          match i with
-          | IMove (d, s) -> Hashtbl.replace alias d (resolve s)
-          | IPhi (d, incoming) ->
-              let ops = List.map (fun (_, v) -> resolve v) incoming in
-              (match ops with
-              | v :: rest when List.for_all (( = ) v) rest ->
-                  Hashtbl.replace alias d v
-              | _ -> ())
-          | _ -> ())
-        (b.phis @ b.instrs))
-    fn.blocks;
-  let subst = resolve in
-  let rw_i i =
-    let i' =
-      match i with
-      | IConst _ | INop -> i
-      | IMove (d, s) -> IMove (d, subst s)
-      | IBinop (d, op, a, b) -> IBinop (d, op, subst a, subst b)
-      | IUnop (d, op, a) -> IUnop (d, op, subst a)
-      | ICall (d, fid, args) -> ICall (d, fid, List.map subst args)
-      | ICallClosure (d, clo, args) ->
-          ICallClosure (d, subst clo, List.map subst args)
-      | IAlloc (d, tag, fields) -> IAlloc (d, tag, List.map subst fields)
-      | IGetField (d, obj, idx) -> IGetField (d, subst obj, idx)
-      | ISetField (obj, idx, v) -> ISetField (subst obj, idx, subst v)
-      | IMakeClosure (d, fid, env) ->
-          IMakeClosure (d, fid, List.map subst env)
-      | ITupleGet (d, t, idx) -> ITupleGet (d, subst t, idx)
-      | ICons (d, h, t) -> ICons (d, subst h, subst t)
-      | ICar (d, c) -> ICar (d, subst c)
-      | ICdr (d, c) -> ICdr (d, subst c)
-      | IPrint v -> IPrint (subst v)
-      | IPhi (d, incoming) ->
-          IPhi (d, List.map (fun (l, v) -> (l, subst v)) incoming)
-    in
-    if i' <> i then ctx.stats.rewritten <- ctx.stats.rewritten + 1;
-    i'
-  in
-  let rw_t = function
-    | TJump _ as t -> t
-    | TBranch (c, a, b) -> TBranch (subst c, a, b)
-    | TSwitch (v, cases, d) -> TSwitch (subst v, cases, d)
-    | TRet (Some v) -> TRet (Some (subst v))
-    | TRet None as t -> t
-    | THalt (Some v) -> THalt (Some (subst v))
-    | THalt None as t -> t
-    | TTailCall (fid, args) -> TTailCall (fid, List.map subst args)
-    | TTailCallClosure (clo, args) ->
-        TTailCallClosure (subst clo, List.map subst args)
-  in
-  let blocks =
-    List.map
-      (fun (b : block) ->
-        {
-          b with
-          phis = List.map rw_i b.phis;
-          instrs = List.map rw_i b.instrs;
-          term = rw_t b.term;
-        })
-      fn.blocks
-  in
-  { fn with blocks }
+type subst = value Vreg.Map.t
 
-let pass = Pass.make_func_pass ~name:"copy-prop" run_func
+let resolve (s : subst) v =
+  let rec go v seen =
+    match v with
+    | VReg r -> (
+        if Vreg.Set.mem r seen then v
+        else
+          match Vreg.Map.find_opt r s with
+          | Some (VReg _ as v') -> go v' (Vreg.Set.add r seen)
+          | Some v' -> v'
+          | None -> v)
+    | _ -> v
+  in
+  go v Vreg.Set.empty
+
+let add_copy s dst = function
+  | (VReg _ | VConst _) as v -> Vreg.Map.add dst v s
+  | _ -> s
+
+let run_func (f : func) : bool =
+  let subst = ref Vreg.Map.empty in
+  let changed = ref false in
+  List.iter
+    (fun l ->
+      match find_block f l with
+      | None -> ()
+      | Some b ->
+          List.iter
+            (function
+              | Phi { dst; incoming; _ } -> (
+                  match List.map snd incoming with
+                  | v :: rest when List.for_all (value_equal v) rest ->
+                      subst := add_copy !subst dst (resolve !subst v)
+                  | _ -> ())
+              | Assign { dst; src; _ } ->
+                  subst := add_copy !subst dst (resolve !subst src)
+              | _ -> ())
+            (block_all_instrs b))
+    (Cfg.reverse_postorder f);
+  if Vreg.Map.is_empty !subst then false
+  else (
+    let rewrite v =
+      let v' = resolve !subst v in
+      if not (value_equal v v') then changed := true;
+      v'
+    in
+    Label.Map.iter
+      (fun _ b ->
+        b.phis <-
+          List.map (map_instr_values ~on_use:rewrite ~on_def:Fun.id) b.phis;
+        b.instrs <-
+          List.map (map_instr_values ~on_use:rewrite ~on_def:Fun.id) b.instrs;
+        b.terminator <- map_terminator_values rewrite b.terminator)
+      f.blocks;
+    ignore (Ssa.eliminate_trivial_phis f);
+    !changed)
+
+let pass = Pass_manager.make_func_pass "copy_prop" run_func
+let run = run_func

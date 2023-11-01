@@ -105,3 +105,29 @@ let collect heap roots =
 
 let install heap roots =
   Heap.set_collect_fn heap (fun h -> collect h roots)
+
+
+let check_heap (heap : Heap.t) : string list =
+  let errs = ref [] in
+  for i = 0 to heap.top - 1 do
+    match heap.fromspace.(i) with
+    | None -> errs := Printf.sprintf "empty live slot %d" i :: !errs
+    | Some cell -> (
+        match cell.forward with
+        | Some _ ->
+            errs := Printf.sprintf "forward left at %d" i :: !errs
+        | None -> (
+            match cell.kind with
+            | Heap.String _ -> ()
+            | Heap.Tuple xs | Heap.Adt (_, xs) | Heap.Closure (_, xs) ->
+                Array.iter
+                  (function
+                    | Value.Ptr p when p < 0 || p >= heap.top ->
+                        errs :=
+                          Printf.sprintf "dangling ptr %d in %d" p i :: !errs
+                    | _ -> ())
+                  xs))
+  done;
+  List.rev !errs
+
+let force_collect = collect

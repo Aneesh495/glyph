@@ -108,3 +108,38 @@ let alloc_string heap s = raw_alloc heap (String s)
 let alloc_tuple heap xs = raw_alloc heap (Tuple xs)
 let alloc_adt heap tag xs = raw_alloc heap (Adt (tag, xs))
 let alloc_closure heap fid env = raw_alloc heap (Closure (fid, env))
+
+
+let stats heap =
+  Printf.sprintf "heap used=%d/%d allocs_since_gc=%d" heap.top heap.capacity
+    heap.allocs_since_gc
+
+let reset heap =
+  Array.fill heap.fromspace 0 heap.capacity None;
+  Array.fill heap.tospace 0 heap.capacity None;
+  heap.top <- 0;
+  heap.allocs_since_gc <- 0
+
+let iter heap f =
+  for i = 0 to heap.top - 1 do
+    match heap.fromspace.(i) with
+    | Some cell -> f i cell
+    | None -> ()
+  done
+
+let dump fmt heap =
+  Format.fprintf fmt "=== heap dump top=%d cap=%d ===
+" heap.top heap.capacity;
+  iter heap (fun loc cell ->
+      match cell.kind with
+      | String s -> Format.fprintf fmt "  [%d] String(%S)
+" loc s
+      | Tuple xs -> Format.fprintf fmt "  [%d] Tuple(%d)
+" loc (Array.length xs)
+      | Adt (t, xs) ->
+          Format.fprintf fmt "  [%d] Adt(%d,%d)
+" loc t (Array.length xs)
+      | Closure (f, env) ->
+          Format.fprintf fmt "  [%d] Closure(fn%d,env=%d)
+" loc f
+            (Array.length env))

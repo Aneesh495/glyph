@@ -1,7 +1,4 @@
-(** Dominator trees and dominance frontiers. *)
-
 type t
-
 val compute : Mir.func -> t
 val idom_of : t -> Mir.label -> Mir.label option
 val dominates : t -> Mir.label -> Mir.label -> bool
