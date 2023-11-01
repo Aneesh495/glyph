@@ -91,7 +91,10 @@ let run_pipeline ?(stats = empty_stats ()) (pipe : pipeline) (prog : program)
   loop 0;
   prog
 
-let run = run_pipeline
+let run (prog : program) : program =
+  run_pipeline (default_pipeline ()) prog
+
+let run_with = run_pipeline
 
 (** Single sweep — no fixed point. *)
 let run_once ?(stats = empty_stats ()) passes prog =

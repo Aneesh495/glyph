@@ -1,155 +1,177 @@
-(** Sparse / local constant propagation on SSA MIR. *)
+(** Constant folding and propagation on SSA [Mir]. *)
 
 open Mir
 
-type lattice =
-  | Top
-  (** Not a constant / unknown. *)
-  | Const of const
-  | Bottom
-  (** Undefined / unreachable. *)
+let as_int = function VConst (CInt n) -> Some n | _ -> None
+let as_bool = function VConst (CBool b) -> Some b | _ -> None
+let as_float = function VConst (CFloat f) -> Some f | _ -> None
 
-let lattice_equal a b =
+let eval_binop op lhs rhs =
+  match (op, as_int lhs, as_int rhs) with
+  | Add, Some a, Some b -> Some (VConst (CInt (a + b)))
+  | Sub, Some a, Some b -> Some (VConst (CInt (a - b)))
+  | Mul, Some a, Some b -> Some (VConst (CInt (a * b)))
+  | Div, Some a, Some b when b <> 0 -> Some (VConst (CInt (a / b)))
+  | Mod, Some a, Some b when b <> 0 -> Some (VConst (CInt (a mod b)))
+  | Eq, Some a, Some b -> Some (VConst (CBool (a = b)))
+  | Ne, Some a, Some b -> Some (VConst (CBool (a <> b)))
+  | Lt, Some a, Some b -> Some (VConst (CBool (a < b)))
+  | Le, Some a, Some b -> Some (VConst (CBool (a <= b)))
+  | Gt, Some a, Some b -> Some (VConst (CBool (a > b)))
+  | Ge, Some a, Some b -> Some (VConst (CBool (a >= b)))
+  | And, Some a, Some b -> Some (VConst (CInt (a land b)))
+  | Or, Some a, Some b -> Some (VConst (CInt (a lor b)))
+  | Xor, Some a, Some b -> Some (VConst (CInt (a lxor b)))
+  | Shl, Some a, Some b -> Some (VConst (CInt (a lsl b)))
+  | Shr, Some a, Some b -> Some (VConst (CInt (a asr b)))
+  | _ -> (
+      match (op, as_bool lhs, as_bool rhs) with
+      | Eq, Some a, Some b -> Some (VConst (CBool (a = b)))
+      | Ne, Some a, Some b -> Some (VConst (CBool (a <> b)))
+      | And, Some a, Some b -> Some (VConst (CBool (a && b)))
+      | Or, Some a, Some b -> Some (VConst (CBool (a || b)))
+      | _ -> (
+          match (op, as_float lhs, as_float rhs) with
+          | FAdd, Some a, Some b -> Some (VConst (CFloat (a +. b)))
+          | FSub, Some a, Some b -> Some (VConst (CFloat (a -. b)))
+          | FMul, Some a, Some b -> Some (VConst (CFloat (a *. b)))
+          | FDiv, Some a, Some b when b <> 0. ->
+              Some (VConst (CFloat (a /. b)))
+          | Eq, Some a, Some b -> Some (VConst (CBool (Float.equal a b)))
+          | _ -> None))
+
+let eval_unop op arg =
+  match (op, as_int arg) with
+  | Neg, Some a -> Some (VConst (CInt (~-a)))
+  | BitNot, Some a -> Some (VConst (CInt (lnot a)))
+  | _ -> (
+      match (op, as_bool arg) with
+      | Not, Some a -> Some (VConst (CBool (not a)))
+      | _ -> (
+          match (op, as_float arg) with
+          | FNeg, Some a -> Some (VConst (CFloat (~-.a)))
+          | _ -> None))
+
+(** Also accept bare consts (for SCCP). *)
+let fold_binop op a b =
   match (a, b) with
-  | Top, Top | Bottom, Bottom -> true
-  | Const x, Const y -> x = y
-  | _ -> false
+  | VConst ca, VConst cb -> eval_binop op (VConst ca) (VConst cb)
+  | _ -> eval_binop op a b
 
-let meet a b =
-  match (a, b) with
-  | Bottom, x | x, Bottom -> x
-  | Const x, Const y when x = y -> Const x
-  | Const _, Const _ -> Top
-  | Top, _ | _, Top -> Top
+let fold_unop op a =
+  match a with VConst _ -> eval_unop op a | _ -> eval_unop op a
 
-let eval_binop op a b =
-  match (op, a, b) with
-  | Add, CInt x, CInt y -> Some (CInt (x + y))
-  | Sub, CInt x, CInt y -> Some (CInt (x - y))
-  | Mul, CInt x, CInt y -> Some (CInt (x * y))
-  | Div, CInt x, CInt y when y <> 0 -> Some (CInt (x / y))
-  | Mod, CInt x, CInt y when y <> 0 -> Some (CInt (x mod y))
-  | AddF, CFloat x, CFloat y -> Some (CFloat (x +. y))
-  | SubF, CFloat x, CFloat y -> Some (CFloat (x -. y))
-  | MulF, CFloat x, CFloat y -> Some (CFloat (x *. y))
-  | DivF, CFloat x, CFloat y when y <> 0. -> Some (CFloat (x /. y))
-  | Eq, CInt x, CInt y -> Some (CBool (x = y))
-  | Ne, CInt x, CInt y -> Some (CBool (x <> y))
-  | Lt, CInt x, CInt y -> Some (CBool (x < y))
-  | Le, CInt x, CInt y -> Some (CBool (x <= y))
-  | Gt, CInt x, CInt y -> Some (CBool (x > y))
-  | Ge, CInt x, CInt y -> Some (CBool (x >= y))
-  | Eq, CBool x, CBool y -> Some (CBool (x = y))
-  | And, CBool x, CBool y -> Some (CBool (x && y))
-  | Or, CBool x, CBool y -> Some (CBool (x || y))
-  | Eq, CFloat x, CFloat y -> Some (CBool (Float.equal x y))
-  | _ -> None
+let simplify_binop op lhs rhs =
+  match eval_binop op lhs rhs with
+  | Some v -> Some v
+  | None -> (
+      match (op, lhs, rhs) with
+      | Add, VConst (CInt 0), v | Add, v, VConst (CInt 0) -> Some v
+      | Sub, v, VConst (CInt 0) -> Some v
+      | Mul, VConst (CInt 1), v | Mul, v, VConst (CInt 1) -> Some v
+      | Mul, VConst (CInt 0), _ | Mul, _, VConst (CInt 0) ->
+          Some (VConst (CInt 0))
+      | Or, VConst (CBool true), _ | Or, _, VConst (CBool true) ->
+          Some (VConst (CBool true))
+      | Or, VConst (CBool false), v | Or, v, VConst (CBool false) -> Some v
+      | And, VConst (CBool false), _ | And, _, VConst (CBool false) ->
+          Some (VConst (CBool false))
+      | And, VConst (CBool true), v | And, v, VConst (CBool true) -> Some v
+      | _ -> None)
 
-let eval_unop op a =
-  match (op, a) with
-  | Neg, CInt x -> Some (CInt (-x))
-  | NegF, CFloat x -> Some (CFloat (-.x))
-  | Not, CBool x -> Some (CBool (not x))
-  | _ -> None
+type env = value Vreg.Map.t
 
-let run_func (ctx : Pass.context) (fn : func) : func =
-  let values : (vreg, lattice) Hashtbl.t = Hashtbl.create fn.n_vregs in
-  let get v = Option.value ~default:Top (Hashtbl.find_opt values v) in
-  let set v lat =
-    match Hashtbl.find_opt values v with
-    | Some old when lattice_equal old lat -> false
-    | _ ->
-        Hashtbl.replace values v lat;
-        true
+let lookup env = function
+  | VReg r as v -> (
+      match Vreg.Map.find_opt r env with Some c -> c | None -> v)
+  | v -> v
+
+let fold_instr env instr =
+  let lu v = lookup env v in
+  match instr with
+  | Binop ({ dst; op; lhs; rhs; ty; span } as b) -> (
+      let lhs, rhs = (lu lhs, lu rhs) in
+      match simplify_binop op lhs rhs with
+      | Some v ->
+          (Assign { dst; src = v; ty; span }, Vreg.Map.add dst v env, true)
+      | None ->
+          ( Binop { b with lhs; rhs },
+            env,
+            not (value_equal lhs b.lhs && value_equal rhs b.rhs) ))
+  | Unop ({ dst; op; arg; ty; span } as u) -> (
+      let arg = lu arg in
+      match eval_unop op arg with
+      | Some v ->
+          (Assign { dst; src = v; ty; span }, Vreg.Map.add dst v env, true)
+      | None -> (Unop { u with arg }, env, not (value_equal arg u.arg)))
+  | Assign ({ dst; src; _ } as a) ->
+      let src = lu src in
+      let env =
+        match src with
+        | VConst _ -> Vreg.Map.add dst src env
+        | _ -> Vreg.Map.remove dst env
+      in
+      (Assign { a with src }, env, not (value_equal src a.src))
+  | Phi ({ dst; incoming; ty; span } as p) ->
+      let incoming = List.map (fun (l, v) -> (l, lu v)) incoming in
+      (match List.map snd incoming with
+      | v :: rest
+        when (match v with VConst _ -> true | _ -> false)
+             && List.for_all (value_equal v) rest ->
+          (Assign { dst; src = v; ty; span }, Vreg.Map.add dst v env, true)
+      | _ -> (Phi { p with incoming }, env, false))
+  | Call ({ callee; args; _ } as c) ->
+      (Call { c with callee = lu callee; args = List.map lu args }, env, false)
+  | Alloc ({ fields; _ } as a) ->
+      (Alloc { a with fields = List.map lu fields }, env, false)
+  | Load ({ ptr; _ } as l) -> (Load { l with ptr = lu ptr }, env, false)
+  | Store ({ ptr; value; _ } as s) ->
+      (Store { s with ptr = lu ptr; value = lu value }, env, false)
+  | GetField ({ obj; _ } as g) ->
+      (GetField { g with obj = lu obj }, env, false)
+  | SetField ({ obj; value; _ } as s) ->
+      (SetField { s with obj = lu obj; value = lu value }, env, false)
+  | Cast ({ src; _ } as c) -> (Cast { c with src = lu src }, env, false)
+
+let run_block (b : block) : bool =
+  let env = ref Vreg.Map.empty in
+  let changed = ref false in
+  let rewrite instr =
+    let instr', env', ch = fold_instr !env instr in
+    env := env';
+    if ch then changed := true;
+    instr'
   in
-  (* Seed: walk instructions in RPO until fixpoint (SSA so one pass often
-     suffices, but loops via φ need iteration). *)
-  let cfg = Cfg.build fn in
-  let order = Cfg.reverse_postorder cfg in
-  let changed = ref true in
-  let iterations = ref 0 in
-  while !changed && !iterations < 64 do
-    incr iterations;
-    changed := false;
+  b.phis <- List.map rewrite b.phis;
+  b.instrs <- List.map rewrite b.instrs;
+  let term = map_terminator_values (lookup !env) b.terminator in
+  let term =
+    match term with
+    | Branch { cond = VConst (CBool true); then_; span; _ } ->
+        changed := true;
+        Jump (then_, span)
+    | Branch { cond = VConst (CBool false); else_; span; _ } ->
+        changed := true;
+        Jump (else_, span)
+    | t -> t
+  in
+  if not (term == b.terminator) then changed := true;
+  b.terminator <- term;
+  !changed
+
+let run_func (f : func) : bool =
+  ignore (Cfg.ensure_cfg f);
+  let changed = ref false in
+  for _ = 1 to 3 do
     List.iter
-      (fun lbl ->
-        match find_block_opt fn lbl with
-        | None -> ()
-        | Some b ->
-            let eval_instr i =
-              match i with
-              | IConst (d, c) -> if set d (Const c) then changed := true
-              | IMove (d, s) -> if set d (get s) then changed := true
-              | IBinop (d, op, a, b) ->
-                  let lat =
-                    match (get a, get b) with
-                    | Const ca, Const cb -> (
-                        match eval_binop op ca cb with
-                        | Some c -> Const c
-                        | None -> Top)
-                    | Bottom, _ | _, Bottom -> Bottom
-                    | _ -> Top
-                  in
-                  if set d lat then changed := true
-              | IUnop (d, op, a) ->
-                  let lat =
-                    match get a with
-                    | Const ca -> (
-                        match eval_unop op ca with
-                        | Some c -> Const c
-                        | None -> Top)
-                    | Bottom -> Bottom
-                    | _ -> Top
-                  in
-                  if set d lat then changed := true
-              | IPhi (d, incoming) ->
-                  let lat =
-                    List.fold_left
-                      (fun acc (_, v) -> meet acc (get v))
-                      Bottom incoming
-                  in
-                  if set d lat then changed := true
-              | ICall (d, _, _)
-              | ICallClosure (d, _, _)
-              | IAlloc (d, _, _)
-              | IGetField (d, _, _)
-              | IMakeClosure (d, _, _)
-              | ITupleGet (d, _, _)
-              | ICons (d, _, _)
-              | ICar (d, _)
-              | ICdr (d, _) ->
-                  if set d Top then changed := true
-              | ISetField _ | IPrint _ | INop -> ()
-            in
-            List.iter eval_instr b.phis;
-            List.iter eval_instr b.instrs)
-      order
+      (fun l ->
+        match find_block f l with
+        | Some b -> if run_block b then changed := true
+        | None -> ())
+      (Cfg.reverse_postorder f)
   done;
-  (* Rewrite constant vregs to IConst where profitable. *)
-  let rewrite_instr i =
-    match instr_def i with
-    | Some d -> (
-        match get d with
-        | Const c ->
-            (match i with
-            | IConst _ -> i
-            | _ ->
-                ctx.stats.rewritten <- ctx.stats.rewritten + 1;
-                IConst (d, c))
-        | _ -> i)
-    | None -> i
-  in
-  let blocks =
-    List.map
-      (fun (b : block) ->
-        {
-          b with
-          phis = List.map rewrite_instr b.phis;
-          instrs = List.map rewrite_instr b.instrs;
-        })
-      fn.blocks
-  in
-  { fn with blocks }
+  ignore (Ssa.cleanup f);
+  !changed
 
-let pass =
-  Pass.make_func_pass ~name:"const-prop" run_func
+let pass = Pass_manager.make_func_pass "const_prop" run_func
+let run = run_func

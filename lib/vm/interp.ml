@@ -1,7 +1,5 @@
 (** Register-based bytecode interpreter. *)
 
-open Glyph_codegen
-
 type frame = {
   mutable regs : Value.t array;
   mutable ip : int;

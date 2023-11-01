@@ -1,215 +1,165 @@
-(** Linear-scan register allocation for Glyph MIR.
-
-    Strategy (Poletto & Sarkar style, adapted for an unbounded bytecode
-    register file):
-
-    1. Number instructions in a reverse-postorder walk of the CFG so each
-       definition/use has a discrete program point.
-    2. Compute live intervals [start, end] per SSA vreg via a backward dataflow
-       liveness pass, then take the min def / max use as the interval.
-    3. Sort intervals by start point; assign the lowest free physical register
-       whose current occupants have expired; otherwise allocate a fresh preg.
-
-    Because the VM register file is soft-bounded ([proto.max_regs]), we do not
-    spill to memory — we simply grow the register count. Linear scan still
-    reuses registers aggressively across non-overlapping live ranges, which
-    keeps frame sizes small.
-
-    φ-nodes are handled by assigning the φ destination a register and emitting
-    Moves in predecessor blocks during codegen (see Emit); here we treat φ
-    destinations as normal defs and φ arguments as uses at the end of the
-    corresponding predecessor.
-*)
+(** Linear-scan register allocation for Ident-based SSA MIR. *)
 
 type preg = int
-type vreg = Mir.vreg
 
 type interval = {
-  vreg : vreg;
+  vreg : Mir.vreg;
   mutable start : int;
   mutable end_ : int;
 }
 
 type result = {
-  mapping : preg array;
-      (** [mapping.(v)] = physical register for virtual register [v],
-          or [-1] if unused. *)
+  mapping : preg Mir.Vreg.Map.t;
   n_regs : int;
   intervals : interval list;
 }
 
-(* -------------------------------------------------------------------------- *)
-(* Instruction numbering                                                      *)
-(* -------------------------------------------------------------------------- *)
+let successors (fn : Mir.func) (lbl : Mir.label) =
+  match Mir.find_block fn lbl with
+  | None -> []
+  | Some b -> Mir.terminator_succs b.terminator
 
-type point_map = {
-  (** Map (block_label, kind, index) → point. We expose helpers instead. *)
-  block_start : (Mir.label, int) Hashtbl.t;
-  block_end : (Mir.label, int) Hashtbl.t;
-  mutable next_point : int;
-}
-
-let rpo_blocks (fn : Mir.func) : Mir.block list =
+let rpo_labels (fn : Mir.func) =
   let visited = Hashtbl.create 16 in
   let order = ref [] in
   let rec dfs lbl =
     if Hashtbl.mem visited lbl then ()
     else (
       Hashtbl.add visited lbl ();
-      List.iter dfs (Mir.successors_of fn lbl);
-      match Mir.find_block_opt fn lbl with
-      | Some b -> order := b :: !order
-      | None -> ())
+      List.iter dfs (successors fn lbl);
+      order := lbl :: !order)
   in
   dfs fn.entry;
-  (* Any unreachable blocks still get numbered deterministically. *)
-  List.iter
+  Mir.iter_blocks
     (fun (b : Mir.block) ->
       if not (Hashtbl.mem visited b.label) then (
         Hashtbl.add visited b.label ();
-        order := !order @ [ b ]))
-    fn.blocks;
+        order := !order @ [ b.label ]))
+    fn;
   List.rev !order
 
 type numbered = {
-  points : point_map;
-  (** For each block: list of (point, instr option) — None marks terminator. *)
-  block_instr_points : (Mir.label, int list) Hashtbl.t;
-  term_point : (Mir.label, int) Hashtbl.t;
+  block_start : (Mir.label, int) Hashtbl.t;
   phi_points : (Mir.label, int list) Hashtbl.t;
+  instr_points : (Mir.label, int list) Hashtbl.t;
+  term_point : (Mir.label, int) Hashtbl.t;
+  block_end : (Mir.label, int) Hashtbl.t;
+  mutable next : int;
 }
 
-let number_func (fn : Mir.func) : numbered =
-  let points =
+let number_func fn =
+  let n =
     {
       block_start = Hashtbl.create 16;
+      phi_points = Hashtbl.create 16;
+      instr_points = Hashtbl.create 16;
+      term_point = Hashtbl.create 16;
       block_end = Hashtbl.create 16;
-      next_point = 0;
+      next = 0;
     }
   in
-  let block_instr_points = Hashtbl.create 16 in
-  let term_point = Hashtbl.create 16 in
-  let phi_points = Hashtbl.create 16 in
   let alloc () =
-    let p = points.next_point in
-    points.next_point <- p + 1;
+    let p = n.next in
+    n.next <- p + 1;
     p
   in
   List.iter
-    (fun (b : Mir.block) ->
-      let start = alloc () in
-      Hashtbl.replace points.block_start b.label start;
-      let phi_ps =
-        List.map
-          (fun _ -> alloc ())
-          b.phis
-      in
-      Hashtbl.replace phi_points b.label phi_ps;
-      let ips =
-        List.map
-          (fun _ -> alloc ())
-          b.instrs
-      in
-      Hashtbl.replace block_instr_points b.label ips;
-      let tp = alloc () in
-      Hashtbl.replace term_point b.label tp;
-      Hashtbl.replace points.block_end b.label tp)
-    (rpo_blocks fn);
-  { points; block_instr_points; term_point; phi_points }
+    (fun lbl ->
+      match Mir.find_block fn lbl with
+      | None -> ()
+      | Some b ->
+          Hashtbl.replace n.block_start lbl (alloc ());
+          Hashtbl.replace n.phi_points lbl (List.map (fun _ -> alloc ()) b.phis);
+          Hashtbl.replace n.instr_points lbl
+            (List.map (fun _ -> alloc ()) b.instrs);
+          let tp = alloc () in
+          Hashtbl.replace n.term_point lbl tp;
+          Hashtbl.replace n.block_end lbl tp)
+    (rpo_labels fn);
+  n
 
-(* -------------------------------------------------------------------------- *)
-(* Liveness                                                                   *)
-(* -------------------------------------------------------------------------- *)
+module VSet = Mir.Vreg.Set
 
-module VSet = Set.Make (Int)
-
-let compute_live_intervals (fn : Mir.func) (num : numbered) : interval list =
-  let npoints = num.points.next_point in
-  let live_in : VSet.t array = Array.make (List.length fn.blocks) VSet.empty in
+let compute_intervals fn num =
+  let labels = Mir.func_labels fn in
   let label_index = Hashtbl.create 16 in
-  List.iteri
-    (fun i (b : Mir.block) -> Hashtbl.replace label_index b.label i)
-    fn.blocks;
-  let idx_of lbl = Hashtbl.find label_index lbl in
-
-  (* Build use/def sets per block (excluding φ uses — those are attributed to
-     predecessors). *)
-  let block_use = Array.make (List.length fn.blocks) VSet.empty in
-  let block_def = Array.make (List.length fn.blocks) VSet.empty in
+  List.iteri (fun i l -> Hashtbl.replace label_index l i) labels;
+  let idx_of l = Hashtbl.find label_index l in
+  let nblocks = List.length labels in
+  let live_in = Array.make nblocks VSet.empty in
+  let live_out = Array.make nblocks VSet.empty in
+  let block_use = Array.make nblocks VSet.empty in
+  let block_def = Array.make nblocks VSet.empty in
   List.iter
-    (fun (b : Mir.block) ->
-      let i = idx_of b.label in
-      let use = ref VSet.empty in
-      let def = ref VSet.empty in
-      let add_use v =
-        if not (VSet.mem v !def) then use := VSet.add v !use
-      in
-      let add_def v = def := VSet.add v !def in
-      List.iter
-        (fun instr ->
-          List.iter add_use (Mir.instr_uses instr);
-          Option.iter add_def (Mir.instr_def instr))
-        (b.phis @ b.instrs);
-      List.iter add_use (Mir.term_uses b.term);
-      block_use.(i) <- !use;
-      block_def.(i) <- !def)
-    fn.blocks;
-
-  (* φ operand uses belong to the predecessor edge. *)
+    (fun lbl ->
+      match Mir.find_block fn lbl with
+      | None -> ()
+      | Some b ->
+          let i = idx_of lbl in
+          let use = ref VSet.empty in
+          let def = ref VSet.empty in
+          let add_use v =
+            if not (VSet.mem v !def) then use := VSet.add v !use
+          in
+          let add_def v = def := VSet.add v !def in
+          List.iter
+            (fun instr ->
+              List.iter add_use (Mir.instr_uses instr);
+              List.iter add_def (Mir.instr_defs instr))
+            (Mir.block_all_instrs b);
+          List.iter add_use (Mir.terminator_uses b.terminator);
+          block_use.(i) <- !use;
+          block_def.(i) <- !def)
+    labels;
   let pred_phi_uses : (Mir.label, VSet.t) Hashtbl.t = Hashtbl.create 16 in
+  List.iter (fun l -> Hashtbl.replace pred_phi_uses l VSet.empty) labels;
   List.iter
-    (fun (b : Mir.block) -> Hashtbl.replace pred_phi_uses b.label VSet.empty)
-    fn.blocks;
-  List.iter
-    (fun (b : Mir.block) ->
-      List.iter
-        (function
-          | Mir.IPhi (_, incoming) ->
-              List.iter
-                (fun (pred, v) ->
-                  let s =
-                    try Hashtbl.find pred_phi_uses pred
-                    with Not_found -> VSet.empty
-                  in
-                  Hashtbl.replace pred_phi_uses pred (VSet.add v s))
-                incoming
-          | _ -> ())
-        b.phis)
-    fn.blocks;
-
-  (* Iterative liveness. *)
-  let live_out = Array.make (List.length fn.blocks) VSet.empty in
+    (fun lbl ->
+      match Mir.find_block fn lbl with
+      | None -> ()
+      | Some b ->
+          List.iter
+            (function
+              | Mir.Phi { incoming; _ } ->
+                  List.iter
+                    (fun (pred, v) ->
+                      List.iter
+                        (fun u ->
+                          let s =
+                            try Hashtbl.find pred_phi_uses pred
+                            with Not_found -> VSet.empty
+                          in
+                          Hashtbl.replace pred_phi_uses pred (VSet.add u s))
+                        (Mir.value_uses v))
+                    incoming
+              | _ -> ())
+            b.phis)
+    labels;
   let changed = ref true in
   while !changed do
     changed := false;
     List.iter
-      (fun (b : Mir.block) ->
-        let i = idx_of b.label in
+      (fun lbl ->
+        let i = idx_of lbl in
         let out = ref VSet.empty in
         List.iter
-          (fun succ ->
-            out := VSet.union !out live_in.(idx_of succ))
-          (Mir.term_successors b.term);
-        (* Include φ uses on this block as a predecessor. *)
+          (fun succ -> out := VSet.union !out live_in.(idx_of succ))
+          (successors fn lbl);
         out :=
           VSet.union !out
-            (try Hashtbl.find pred_phi_uses b.label
-             with Not_found -> VSet.empty);
+            (try Hashtbl.find pred_phi_uses lbl with Not_found -> VSet.empty);
         if not (VSet.equal !out live_out.(i)) then (
           live_out.(i) <- !out;
           changed := true);
         let new_in =
-          VSet.union block_use.(i)
-            (VSet.diff live_out.(i) block_def.(i))
+          VSet.union block_use.(i) (VSet.diff live_out.(i) block_def.(i))
         in
         if not (VSet.equal new_in live_in.(i)) then (
           live_in.(i) <- new_in;
           changed := true))
-      (List.rev fn.blocks)
+      (List.rev labels)
   done;
-
-  (* Build intervals from defs/uses at concrete points. *)
-  let intervals : (vreg, interval) Hashtbl.t = Hashtbl.create fn.n_vregs in
+  let intervals : (Mir.vreg, interval) Hashtbl.t = Hashtbl.create 64 in
   let touch v point =
     match Hashtbl.find_opt intervals v with
     | Some iv ->
@@ -218,92 +168,72 @@ let compute_live_intervals (fn : Mir.func) (num : numbered) : interval list =
     | None ->
         Hashtbl.add intervals v { vreg = v; start = point; end_ = point }
   in
-
-  (* Parameters live at function entry. *)
-  let entry_pt =
-    try Hashtbl.find num.points.block_start fn.entry with Not_found -> 0
-  in
-  List.iter (fun v -> touch v entry_pt) fn.params;
-
   List.iter
-    (fun (b : Mir.block) ->
-      let phi_ps =
-        try Hashtbl.find num.phi_points b.label with Not_found -> []
-      in
-      List.iter2
-        (fun pt instr ->
-          List.iter (fun u -> touch u pt) (Mir.instr_uses instr);
-          Option.iter (fun d -> touch d pt) (Mir.instr_def instr))
-        phi_ps b.phis;
-      let ips =
-        try Hashtbl.find num.block_instr_points b.label
-        with Not_found -> []
-      in
-      List.iter2
-        (fun pt instr ->
-          List.iter (fun u -> touch u pt) (Mir.instr_uses instr);
-          Option.iter (fun d -> touch d pt) (Mir.instr_def instr))
-        ips b.instrs;
-      let tp = Hashtbl.find num.term_point b.label in
-      List.iter (fun u -> touch u tp) (Mir.term_uses b.term);
-      (* Extend intervals for variables live across the block. *)
-      let bi = idx_of b.label in
-      let bs = Hashtbl.find num.points.block_start b.label in
-      let be = Hashtbl.find num.points.block_end b.label in
-      VSet.iter
-        (fun v ->
-          touch v bs;
-          touch v be)
-        (VSet.union live_in.(bi) live_out.(bi)))
-    fn.blocks;
-
-  (* Ensure every vreg that appears has at least a trivial interval. *)
+    (fun (v, _) ->
+      touch v (try Hashtbl.find num.block_start fn.entry with Not_found -> 0))
+    fn.params;
   List.iter
-    (fun v -> if not (Hashtbl.mem intervals v) then touch v 0)
-    (Mir.all_vregs fn);
-
-  ignore npoints;
+    (fun lbl ->
+      match Mir.find_block fn lbl with
+      | None -> ()
+      | Some b ->
+          let phi_ps =
+            try Hashtbl.find num.phi_points lbl with Not_found -> []
+          in
+          List.iter2
+            (fun pt instr ->
+              List.iter (fun u -> touch u pt) (Mir.instr_uses instr);
+              List.iter (fun d -> touch d pt) (Mir.instr_defs instr))
+            phi_ps b.phis;
+          let ips =
+            try Hashtbl.find num.instr_points lbl with Not_found -> []
+          in
+          List.iter2
+            (fun pt instr ->
+              List.iter (fun u -> touch u pt) (Mir.instr_uses instr);
+              List.iter (fun d -> touch d pt) (Mir.instr_defs instr))
+            ips b.instrs;
+          let tp = Hashtbl.find num.term_point lbl in
+          List.iter (fun u -> touch u tp) (Mir.terminator_uses b.terminator);
+          let bi = idx_of lbl in
+          let bs = Hashtbl.find num.block_start lbl in
+          let be = Hashtbl.find num.block_end lbl in
+          VSet.iter
+            (fun v ->
+              touch v bs;
+              touch v be)
+            (VSet.union live_in.(bi) live_out.(bi)))
+    labels;
   Hashtbl.fold (fun _ iv acc -> iv :: acc) intervals []
-
-(* -------------------------------------------------------------------------- *)
-(* Linear scan                                                                *)
-(* -------------------------------------------------------------------------- *)
 
 type active_entry = {
   preg : preg;
   interval : interval;
 }
 
-let linear_scan (intervals : interval list) : preg array * int =
+let linear_scan intervals =
   let sorted =
     List.sort
       (fun a b ->
         match Int.compare a.start b.start with
-        | 0 -> Int.compare a.vreg b.vreg
+        | 0 -> Mir.Vreg.compare a.vreg b.vreg
         | c -> c)
       intervals
   in
-  let max_vreg =
-    List.fold_left (fun m iv -> max m iv.vreg) (-1) intervals
-  in
-  let mapping = Array.make (max_vreg + 1) (-1) in
-  let active : active_entry list ref = ref [] in
-  let free_pool : preg list ref = ref [] in
+  let mapping = ref Mir.Vreg.Map.empty in
+  let active = ref [] in
+  let free_pool = ref [] in
   let next_preg = ref 0 in
-
   let expire_old start =
     let kept, expired =
-      List.partition (fun (e : active_entry) -> e.interval.end_ >= start) !active
+      List.partition (fun e -> e.interval.end_ >= start) !active
     in
     active :=
       List.sort
         (fun a b -> Int.compare a.interval.end_ b.interval.end_)
         kept;
-    List.iter
-      (fun (e : active_entry) -> free_pool := e.preg :: !free_pool)
-      expired
+    List.iter (fun e -> free_pool := e.preg :: !free_pool) expired
   in
-
   let alloc_preg () =
     match !free_pool with
     | p :: rest ->
@@ -314,92 +244,80 @@ let linear_scan (intervals : interval list) : preg array * int =
         incr next_preg;
         p
   in
-
   List.iter
-    (fun (iv : interval) ->
+    (fun iv ->
       expire_old iv.start;
       let p = alloc_preg () in
-      mapping.(iv.vreg) <- p;
+      mapping := Mir.Vreg.Map.add iv.vreg p !mapping;
       active :=
         List.sort
           (fun a b -> Int.compare a.interval.end_ b.interval.end_)
           ({ preg = p; interval = iv } :: !active))
     sorted;
-  (mapping, !next_preg)
-
-(* -------------------------------------------------------------------------- *)
-(* Public API                                                                 *)
-(* -------------------------------------------------------------------------- *)
+  (!mapping, !next_preg)
 
 let allocate (fn : Mir.func) : result =
   let num = number_func fn in
-  let intervals = compute_live_intervals fn num in
+  let intervals = compute_intervals fn num in
   let mapping, n_regs = linear_scan intervals in
-  (* Guarantee parameters get distinct registers if somehow missed. *)
+  let mapping = ref mapping in
   let n_regs = ref n_regs in
   List.iter
-    (fun v ->
-      if v >= Array.length mapping then ()
-      else if mapping.(v) < 0 then (
-        mapping.(v) <- !n_regs;
+    (fun (v, _) ->
+      if not (Mir.Vreg.Map.mem v !mapping) then (
+        mapping := Mir.Vreg.Map.add v !n_regs !mapping;
         incr n_regs))
     fn.params;
-  { mapping; n_regs = max !n_regs 1; intervals }
+  { mapping = !mapping; n_regs = max !n_regs 1; intervals }
 
-let lookup (r : result) (v : vreg) : preg =
-  if v < 0 || v >= Array.length r.mapping then
-    invalid_arg (Printf.sprintf "Regalloc.lookup: bad vreg %d" v)
-  else
-    let p = r.mapping.(v) in
-    if p < 0 then
-      (* Unused vreg — give it a scratch by extending conceptually; callers
-         should not look up dead vregs, but be defensive. *)
-      0
-    else p
+let lookup (r : result) (v : Mir.vreg) : preg =
+  match Mir.Vreg.Map.find_opt v r.mapping with
+  | Some p -> p
+  | None -> 0
 
-let lookup_opt (r : result) (v : vreg) : preg option =
-  if v < 0 || v >= Array.length r.mapping then None
-  else
-    let p = r.mapping.(v) in
-    if p < 0 then None else Some p
+let lookup_opt r v = Mir.Vreg.Map.find_opt v r.mapping
 
-let pp_result fmt (r : result) =
-  Format.fprintf fmt "regalloc: %d physical regs\n" r.n_regs;
-  Array.iteri
-    (fun v p ->
-      if p >= 0 then Format.fprintf fmt "  %%%d -> r%d\n" v p)
-    r.mapping;
-  Format.fprintf fmt "intervals:\n";
-  List.iter
-    (fun (iv : interval) ->
-      Format.fprintf fmt "  %%%d: [%d, %d]\n" iv.vreg iv.start iv.end_)
-    (List.sort
-       (fun a b -> Int.compare a.start b.start)
-       r.intervals)
-
-(** Identity allocation: preg = vreg. Useful for debugging. *)
 let identity (fn : Mir.func) : result =
-  let n = max 1 fn.n_vregs in
-  let mapping = Array.init n (fun i -> i) in
-  let intervals =
-    List.map
-      (fun v -> { vreg = v; start = 0; end_ = 0 })
-      (Mir.all_vregs fn)
+  let mapping = ref Mir.Vreg.Map.empty in
+  let next = ref 0 in
+  let add v =
+    if not (Mir.Vreg.Map.mem v !mapping) then (
+      mapping := Mir.Vreg.Map.add v !next !mapping;
+      incr next)
   in
-  { mapping; n_regs = n; intervals }
+  List.iter (fun (v, _) -> add v) fn.params;
+  Mir.iter_blocks
+    (fun b ->
+      List.iter
+        (fun i ->
+          List.iter add (Mir.instr_defs i);
+          List.iter add (Mir.instr_uses i))
+        (Mir.block_all_instrs b);
+      List.iter add (Mir.terminator_uses b.terminator))
+    fn;
+  { mapping = !mapping; n_regs = max !next 1; intervals = [] }
 
-(** Validate that the mapping covers all defs/uses. *)
-let validate (fn : Mir.func) (r : result) : string list =
+let validate fn r =
   let errs = ref [] in
   let check v =
-    if v < 0 || v >= Array.length r.mapping || r.mapping.(v) < 0 then
-      errs := Printf.sprintf "unmapped vreg %%%d" v :: !errs
+    if not (Mir.Vreg.Map.mem v r.mapping) then
+      errs :=
+        Printf.sprintf "unmapped %s" (Mir.Vreg.to_string v) :: !errs
   in
-  List.iter check fn.params;
-  Mir.iter_instrs fn (fun _ i ->
-      Option.iter check (Mir.instr_def i);
-      List.iter check (Mir.instr_uses i));
-  List.iter
-    (fun (b : Mir.block) -> List.iter check (Mir.term_uses b.term))
-    fn.blocks;
+  List.iter (fun (v, _) -> check v) fn.params;
+  Mir.iter_blocks
+    (fun b ->
+      List.iter
+        (fun i ->
+          List.iter check (Mir.instr_defs i);
+          List.iter check (Mir.instr_uses i))
+        (Mir.block_all_instrs b);
+      List.iter check (Mir.terminator_uses b.terminator))
+    fn;
   List.rev !errs
+
+let pp_result fmt r =
+  Format.fprintf fmt "regalloc: %d regs\n" r.n_regs;
+  Mir.Vreg.Map.iter
+    (fun v p -> Format.fprintf fmt "  %a -> r%d\n" Mir.Vreg.pp v p)
+    r.mapping

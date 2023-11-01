@@ -1,5 +1,0 @@
-(library
- (name glyph_vm)
- (public_name glyph.vm)
- (libraries glyph_util glyph_codegen)
- (flags (:standard -w +a-4-29-40-41-42-44-45-48-58-59-60)))

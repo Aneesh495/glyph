@@ -265,3 +265,6 @@ let construct_program (prog : program) : program =
     (fun _ f -> ignore (construct f))
     prog.funcs;
   prog
+
+
+let convert = construct
