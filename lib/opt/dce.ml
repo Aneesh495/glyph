@@ -1,62 +1,58 @@
-(** Dead code elimination. *)
+(** Dead code elimination on SSA MIR. *)
 
 open Mir
 
-let has_side_effect = function
-  | Store _ | SetField _ | Call _ -> true
+let effectful = function
+  | Call _ | Store _ | SetField _ | Alloc _ -> true
   | _ -> false
 
 let run_func (f : func) : bool =
-  ignore (Cfg.ensure_cfg f);
-  let live = Vreg.Tbl.create 128 in
-  let work = Queue.create () in
-  let mark r =
-    if not (Vreg.Tbl.mem live r) then (
-      Vreg.Tbl.replace live r true;
-      Queue.add r work)
+  let live = Vreg.Tbl.create 64 in
+  let q = Queue.create () in
+  let mark v =
+    if not (Vreg.Tbl.mem live v) then (
+      Vreg.Tbl.add live v ();
+      Queue.push v q)
   in
   Label.Map.iter
-    (fun _ b ->
+    (fun _ (b : block) ->
       List.iter mark (terminator_uses b.terminator);
       List.iter
-        (fun instr ->
-          if has_side_effect instr then List.iter mark (instr_uses instr))
-        (block_all_instrs b))
+        (fun i ->
+          if effectful i then (
+            List.iter mark (instr_uses i);
+            List.iter mark (instr_defs i)))
+        (b.phis @ b.instrs))
     f.blocks;
-  let def_uses = Vreg.Tbl.create 128 in
+  let def_of = Vreg.Tbl.create 64 in
   Label.Map.iter
-    (fun _ b ->
+    (fun _ (b : block) ->
       List.iter
-        (fun instr ->
-          List.iter
-            (fun d -> Vreg.Tbl.replace def_uses d (instr_uses instr))
-            (instr_defs instr))
-        (block_all_instrs b))
+        (fun i ->
+          List.iter (fun d -> Vreg.Tbl.replace def_of d i) (instr_defs i))
+        (b.phis @ b.instrs))
     f.blocks;
-  while not (Queue.is_empty work) do
-    let r = Queue.take work in
-    match Vreg.Tbl.find_opt def_uses r with
+  while not (Queue.is_empty q) do
+    match Vreg.Tbl.find_opt def_of (Queue.pop q) with
+    | Some i -> List.iter mark (instr_uses i)
     | None -> ()
-    | Some uses -> List.iter mark uses
   done;
   let changed = ref false in
+  let keep i =
+    match instr_defs i with
+    | [] -> true
+    | ds -> List.exists (Vreg.Tbl.mem live) ds || effectful i
+  in
   Label.Map.iter
-    (fun _ b ->
-      let filter instrs =
-        List.filter
-          (fun instr ->
-            if has_side_effect instr then true
-            else
-              match instr_defs instr with
-              | [] -> true
-              | ds ->
-                  let keep = List.exists (Vreg.Tbl.mem live) ds in
-                  if not keep then changed := true;
-                  keep)
-          instrs
-      in
-      b.phis <- filter b.phis;
-      b.instrs <- filter b.instrs)
+    (fun _ (b : block) ->
+      let phis = List.filter keep b.phis in
+      let instrs = List.filter keep b.instrs in
+      if
+        List.length phis <> List.length b.phis
+        || List.length instrs <> List.length b.instrs
+      then changed := true;
+      b.phis <- phis;
+      b.instrs <- instrs)
     f.blocks;
   !changed
 

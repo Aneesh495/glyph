@@ -54,6 +54,8 @@ let rec to_string = function
 
 let pp fmt v = Format.pp_print_string fmt (to_string v)
 
+let unit = Unit
+
 let is_truthy = function
   | Bool b -> b
   | Int 0 -> false

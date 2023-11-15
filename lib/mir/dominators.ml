@@ -1,70 +1,193 @@
+(** Dominator tree and dominance frontiers (Cytron / Cooper–Harvey–Kennedy).
+
+    Uses the iterative dataflow algorithm of Cooper, Harvey, Kennedy
+    ("A Simple, Fast Dominance Algorithm") over the [Cfg] digraph view. *)
+
 open Mir
-type t = {
+
+type tree = {
   idom : (label, label) Hashtbl.t;
+  (** Immediate dominator; entry maps to itself. *)
   children : (label, label list) Hashtbl.t;
-  df : (label, label list) Hashtbl.t;
+  (** Dominator-tree children. *)
+  df : (label, Label.Set.t) Hashtbl.t;
+  (** Dominance frontier. *)
+  dom_depth : (label, int) Hashtbl.t;
   rpo : label list;
 }
-let compute f =
-  let rpo = Cfg.reverse_postorder f in
-  let idom = Hashtbl.create 16 in
-  (match rpo with e :: _ -> Hashtbl.replace idom e e | [] -> ());
-  let changed = ref true in
-  while !changed do
-    changed := false;
-    List.iter (fun b ->
-      if b <> f.entry then
-        let preds = Cfg.predecessors f b |> List.filter (Hashtbl.mem idom) in
-        match preds with
-        | [] -> ()
-        | p0 :: rest ->
-            let rec depth x =
-              if x = f.entry then 0 else
-              match Hashtbl.find_opt idom x with Some p when p <> x -> 1+depth p | _ -> 0
-            in
-            let rec intersect a b =
-              if a = b then a
-              else if depth a > depth b then intersect (Hashtbl.find idom a) b
-              else if depth b > depth a then intersect a (Hashtbl.find idom b)
-              else intersect (Hashtbl.find idom a) (Hashtbl.find idom b)
-            in
-            let ni = List.fold_left intersect p0 rest in
-            match Hashtbl.find_opt idom b with Some o when o = ni -> () | _ ->
-              Hashtbl.replace idom b ni; changed := true
-    ) rpo
-  done;
-  let children = Hashtbl.create 16 in
-  Hashtbl.iter (fun n p -> if n <> p then
-    Hashtbl.replace children p (n :: (try Hashtbl.find children p with Not_found -> []))) idom;
-  let df = Hashtbl.create 16 in
-  List.iter (fun l -> Hashtbl.replace df l []) rpo;
-  List.iter (fun b ->
-    let preds = Cfg.predecessors f b in
-    if List.length preds >= 2 then
-      List.iter (fun p ->
-        let rec runner r =
-          if r <> Hashtbl.find idom b then (
-            let set = try Hashtbl.find df r with Not_found -> [] in
-            if not (List.mem b set) then Hashtbl.replace df r (b :: set);
-            match Hashtbl.find_opt idom r with Some r' when r' <> r -> runner r' | _ -> ())
-        in runner p) preds
-  ) rpo;
-  { idom; children; df; rpo }
-let idom_of t l = match Hashtbl.find_opt t.idom l with Some p when p = l -> None | x -> x
-let dominates t d n =
-  let rec go x = if x = d then true else match Hashtbl.find_opt t.idom x with
-    | None -> false | Some p when p = x -> x = d | Some p -> go p
-  in go n
-let dominance_frontier t l = try Hashtbl.find t.df l with Not_found -> []
-let children_of t l = try Hashtbl.find t.children l with Not_found -> []
-let dominator_tree_preorder t = t.rpo
-let iterated_dominance_frontier t nodes =
-  let q = Queue.create () and r = Hashtbl.create 8 in
-  List.iter (fun n -> Queue.add n q) nodes;
-  while not (Queue.is_empty q) do
-    let n = Queue.take q in
-    List.iter (fun d -> if not (Hashtbl.mem r d) then (Hashtbl.replace r d (); Queue.add d q))
-      (dominance_frontier t n)
-  done;
-  Hashtbl.fold (fun d _ a -> d::a) r []
-let pp fmt t = Format.fprintf fmt "doms(%d)" (List.length t.rpo)
+
+let dominates (t : tree) ~dominator ~node =
+  let rec go n depth =
+    if depth > 10000 then false
+    else if Label.equal n dominator then true
+    else
+      match Hashtbl.find_opt t.idom n with
+      | None -> false
+      | Some p when Label.equal p n -> Label.equal dominator n
+      | Some p -> go p (depth + 1)
+  in
+  go node 0
+
+let strictly_dominates t ~dominator ~node =
+  (not (Label.equal dominator node)) && dominates t ~dominator ~node
+
+let idom_of t l = Hashtbl.find_opt t.idom l
+
+let children_of t l =
+  try Hashtbl.find t.children l with Not_found -> []
+
+let dominance_frontier t l =
+  try Hashtbl.find t.df l with Not_found -> Label.Set.empty
+
+(* -------------------------------------------------------------------------- *)
+(* Cooper–Harvey–Kennedy                                                      *)
+(* -------------------------------------------------------------------------- *)
+
+let compute (f : func) : tree =
+  let f = Cfg.ensure_cfg f in
+  let rpo = Cfg.reachable_rpo f in
+  let n = List.length rpo in
+  if n = 0 then
+    {
+      idom = Hashtbl.create 1;
+      children = Hashtbl.create 1;
+      df = Hashtbl.create 1;
+      dom_depth = Hashtbl.create 1;
+      rpo = [];
+    }
+  else
+    let idx = Cfg.to_digraph f in
+    (* Restrict to reachable RPO labels. *)
+    let labels = Array.of_list rpo in
+    let index_of = Hashtbl.create n in
+    Array.iteri (fun i l -> Hashtbl.replace index_of l i) labels;
+    let entry = f.entry in
+    let entry_i = Hashtbl.find index_of entry in
+
+    (* idom as indices; -1 = undefined *)
+    let idom = Array.make n (-1) in
+    idom.(entry_i) <- entry_i;
+
+    let intersect i1 i2 =
+      let finger1 = ref i1 in
+      let finger2 = ref i2 in
+      while !finger1 <> !finger2 do
+        while !finger1 > !finger2 do
+          finger1 := idom.(!finger1)
+        done;
+        while !finger2 > !finger1 do
+          finger2 := idom.(!finger2)
+        done
+      done;
+      !finger1
+    in
+
+    let rpo_order = Array.init n (fun i -> i) in
+    (* Process in RPO excluding entry. *)
+    let changed = ref true in
+    while !changed do
+      changed := false;
+      for k = 0 to n - 1 do
+        let i = rpo_order.(k) in
+        if i = entry_i then ()
+        else
+          let l = labels.(i) in
+          let preds = Cfg.predecessors f l in
+          let new_idom = ref (-1) in
+          List.iter
+            (fun p ->
+              match Hashtbl.find_opt index_of p with
+              | None -> ()
+              | Some pi ->
+                  if idom.(pi) >= 0 then
+                    if !new_idom < 0 then new_idom := pi
+                    else new_idom := intersect !new_idom pi)
+            preds;
+          if !new_idom >= 0 && idom.(i) <> !new_idom then (
+            idom.(i) <- !new_idom;
+            changed := true)
+      done
+    done;
+
+    let idom_tbl = Hashtbl.create n in
+    let children = Hashtbl.create n in
+    Array.iteri
+      (fun i l ->
+        let d = labels.(idom.(i)) in
+        Hashtbl.replace idom_tbl l d;
+        if not (Label.equal l d) then
+          let kids = try Hashtbl.find children d with Not_found -> [] in
+          Hashtbl.replace children d (l :: kids))
+      labels;
+    Hashtbl.iter
+      (fun k vs -> Hashtbl.replace children k (List.sort_uniq Label.compare vs))
+      children;
+
+    (* Dominance frontiers. *)
+    let df = Hashtbl.create n in
+    Array.iter (fun l -> Hashtbl.replace df l Label.Set.empty) labels;
+    Array.iter
+      (fun l ->
+        let preds = Cfg.predecessors f l in
+        if List.length preds >= 2 then
+          List.iter
+            (fun p ->
+              let runner = ref p in
+              let idom_l = Hashtbl.find idom_tbl l in
+              while not (Label.equal !runner idom_l) do
+                let set =
+                  try Hashtbl.find df !runner with Not_found -> Label.Set.empty
+                in
+                Hashtbl.replace df !runner (Label.Set.add l set);
+                match Hashtbl.find_opt idom_tbl !runner with
+                | None -> runner := idom_l (* break *)
+                | Some d ->
+                    if Label.equal d !runner then runner := idom_l
+                    else runner := d
+              done)
+            preds)
+      labels;
+
+    let dom_depth = Hashtbl.create n in
+    let rec depth l =
+      match Hashtbl.find_opt dom_depth l with
+      | Some d -> d
+      | None ->
+          let d =
+            if Label.equal l entry then 0
+            else
+              match Hashtbl.find_opt idom_tbl l with
+              | None -> 0
+              | Some p when Label.equal p l -> 0
+              | Some p -> 1 + depth p
+          in
+          Hashtbl.replace dom_depth l d;
+          d
+    in
+    Array.iter (fun l -> ignore (depth l)) labels;
+
+    { idom = idom_tbl; children; df; dom_depth; rpo }
+
+(** Iterate dominator-tree children in DFS preorder starting at entry. *)
+let iter_dom_tree (t : tree) ~(entry : label) f =
+  let rec go l =
+    f l;
+    List.iter go (children_of t l)
+  in
+  go entry
+
+let pp fmt (t : tree) =
+  Format.fprintf fmt "Dominators:@,";
+  List.iter
+    (fun l ->
+      let id =
+        match Hashtbl.find_opt t.idom l with
+        | None -> "?"
+        | Some i -> Label.to_string i
+      in
+      let frontier =
+        dominance_frontier t l |> Label.Set.elements
+        |> List.map Label.to_string |> String.concat ","
+      in
+      Format.fprintf fmt "  %a idom=%s df={%s}@," Label.pp l id frontier)
+    t.rpo

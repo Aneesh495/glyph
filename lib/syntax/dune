@@ -1,0 +1,6 @@
+(library
+ (name glyph_syntax)
+ (public_name glyph.syntax)
+ (wrapped false)
+ (libraries glyph_util)
+ (flags (:standard -w -32-33-27-26-70-50-9-6-67-69)))

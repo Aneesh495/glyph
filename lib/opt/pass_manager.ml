@@ -91,10 +91,6 @@ let run_pipeline ?(stats = empty_stats ()) (pipe : pipeline) (prog : program)
   loop 0;
   prog
 
-let run (prog : program) : program =
-  run_pipeline (default_pipeline ()) prog
-
-let run_with = run_pipeline
 
 (** Single sweep — no fixed point. *)
 let run_once ?(stats = empty_stats ()) passes prog =
@@ -126,6 +122,11 @@ let run_default prog =
   let stats = empty_stats () in
   let prog = run_pipeline ~stats (default_pipeline ()) prog in
   (prog, stats)
+
+let run (prog : program) : program =
+  run_pipeline (default_pipeline ()) prog
+
+let run_with = run_pipeline
 
 let pp_stats fmt stats =
   Format.fprintf fmt "iterations: %d\n" stats.iterations;

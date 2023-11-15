@@ -1,7 +1,6 @@
-(include_subdirs unqualified)
-
 (library
  (name glyph)
  (public_name glyph)
  (libraries unix)
- (flags (:standard -w -32-33-27-26-70-50-9-6-67-69-37-34-39)))
+ (include_subdirs unqualified)
+ (flags (:standard -w +a-4-29-40-41-42-44-45-48-58-59-60)))

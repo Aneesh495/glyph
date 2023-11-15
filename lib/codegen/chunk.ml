@@ -226,3 +226,6 @@ let read_file path =
   really_input ic bytes 0 len;
   close_in ic;
   of_bytes bytes
+
+let of_file = read_file
+let to_file = write_file
