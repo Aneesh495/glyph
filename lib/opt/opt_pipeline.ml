@@ -1,4 +1,4 @@
-(** Register the standard O2 optimization pipeline with [Pass_manager]. *)
+(** Register the standard O2 optimization pipeline. *)
 
 let () =
   Pass_manager.register_standard
@@ -13,5 +13,4 @@ let () =
       Simplify_cfg.pass;
       Const_prop.pass;
       Dce.pass;
-      Simplify_cfg.pass;
     ]
