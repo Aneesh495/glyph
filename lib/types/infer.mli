@@ -1,32 +1,15 @@
-(** Algorithm W / Hindley–Milner inference for Glyph.
+(** Algorithm W / Hindley–Milner inference for Glyph. *)
 
-    {[
-      Infer.infer_program :
-        ?env:Env.t -> Ast.program ->
-        (Infer.result, Diagnostic.t list) result
-    ]}
-*)
-
-type result = {
-  env : Env.t;
-  (** Top-level value identifier → generalized scheme. *)
-  schemes : Ty.scheme Ident.Map.t;
-  (** Binding-site monotypes (instantiated principals). *)
-  bindings : Ty.ty Ident.Map.t;
-  (** Expression span → inferred type. *)
-  expr_types : (Span.t * Ty.ty) list;
-}
-
-(** Infer a whole program. On success returns annotations + final env;
-    on hard type errors returns diagnostics. *)
+(** Infer types for a whole program, returning the enriched environment
+    (prelude + top-level bindings) or a list of diagnostics. *)
 val infer_program :
-  ?env:Env.t -> Ast.program -> (result, Diagnostic.t list) result
+  ?env:Env.t -> Ast.program -> (Env.t, Diagnostic.t list) result
 
-(** Infer a single expression, returning its type. *)
+(** Infer the type of a single expression. *)
 val infer_expr :
   ?env:Env.t -> Ast.expr -> (Ty.ty, Diagnostic.t list) result
 
-(** Infer a pattern against [expected], returning bound variables. *)
+(** Infer a pattern against an expected type, returning bound variables. *)
 val infer_pat :
   ?env:Env.t ->
   expected:Ty.ty ->
