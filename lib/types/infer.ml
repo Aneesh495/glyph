@@ -448,7 +448,9 @@ and infer_let_rec ctx (lbs : Ast.let_binding list) body =
     placeholders;
   leave_level ();
   let schemes =
-    List.map (fun (lb, tv) -> (lb.lb_name, generalize tv)) placeholders
+    List.map
+      (fun ((lb : Ast.let_binding), tv) -> (lb.Ast.lb_name, generalize tv))
+      placeholders
   in
   with_env_snapshot ctx (fun () ->
       List.iter

@@ -1,52 +1,40 @@
-(** Hand-written recursive-descent + Pratt parser for Glyph. *)
+(** Hand-written Pratt parser for Glyph (flat token kinds). *)
 
-type parser = {
+type error = { message : string; span : Span.t }
+
+exception Error of error
+
+type t = {
+  file : string;
+  source : string;
   tokens : Token.t array;
   mutable index : int;
-  mutable diagnostics : Diagnostic.t list;
-  filename : string;
 }
 
-let of_tokens ~filename tokens =
+let create ~file ~source tokens =
   let tokens =
     match tokens with
-    | [] -> [| Token.make Token.Eof Span.dummy "" |]
+    | [] -> [| Token.make Token.Eof ~span:Span.dummy ~lexeme:"" |]
     | xs -> Array.of_list xs
   in
-  { tokens; index = 0; diagnostics = []; filename }
-
-let diagnostics p = List.rev p.diagnostics
-
-let error p span message =
-  p.diagnostics <- Diagnostic.error span message :: p.diagnostics
+  { file; source; tokens; index = 0 }
 
 let current p =
   if p.index >= Array.length p.tokens then
     let last = p.tokens.(Array.length p.tokens - 1) in
-    Token.make Token.Eof last.Token.span ""
+    Token.make Token.Eof ~span:last.Token.span ~lexeme:""
   else p.tokens.(p.index)
-
-let peek_n p n =
-  let i = p.index + n in
-  if i >= Array.length p.tokens then
-    Token.make Token.Eof Span.dummy ""
-  else p.tokens.(i)
 
 let advance p =
   let tok = current p in
   if not (Token.is_eof tok) then p.index <- p.index + 1;
   tok
 
-let at_eof p = Token.is_eof (current p)
+let at_end p = Token.is_eof (current p)
+let fail span message = raise (Error { message; span })
 
-let check_punct p punct = Token.is_punct (current p) punct
 let check_kw p kw = Token.is_keyword (current p) kw
-
-let consume_punct p punct =
-  if check_punct p punct then (
-    ignore (advance p);
-    true)
-  else false
+let check_kind p k = (current p).Token.kind = k
 
 let consume_kw p kw =
   if check_kw p kw then (
@@ -54,637 +42,326 @@ let consume_kw p kw =
     true)
   else false
 
-let expect_punct p punct =
-  let tok = current p in
-  if Token.is_punct tok punct then Ok (advance p)
-  else (
-    error p tok.Token.span
-      (Printf.sprintf "expected '%s', found '%s'"
-         (Token.punct_to_string punct)
-         (Token.kind_to_string tok.Token.kind));
-    Error tok)
+let consume_kind p k =
+  if check_kind p k then (
+    ignore (advance p);
+    true)
+  else false
 
 let expect_kw p kw =
   let tok = current p in
-  if Token.is_keyword tok kw then Ok (advance p)
-  else (
-    error p tok.Token.span
-      (Printf.sprintf "expected '%s', found '%s'"
+  if Token.is_keyword tok kw then advance p
+  else
+    fail tok.Token.span
+      (Printf.sprintf "expected '%s', found %s"
          (Token.keyword_to_string kw)
-         (Token.kind_to_string tok.Token.kind));
-    Error tok)
+         (Token.kind_to_string tok.Token.kind))
 
-let synchronize p =
-  ignore (advance p);
-  let stop = ref false in
-  while (not !stop) && not (at_eof p) do
-    match (current p).Token.kind with
-    | Token.Punct Token.Semicolon ->
-        ignore (advance p);
-        stop := true
-    | Token.Keyword
-        ( Token.Kw_let | Token.Kw_type | Token.Kw_module | Token.Kw_open
-        | Token.Kw_external ) ->
-        stop := true
-    | Token.Punct (Token.RBrace | Token.RParen | Token.RBracket) -> stop := true
-    | _ -> ignore (advance p)
-  done
+let expect_kind p k =
+  let tok = current p in
+  if tok.Token.kind = k then advance p
+  else
+    fail tok.Token.span
+      (Printf.sprintf "expected %s, found %s"
+         (Token.kind_to_string k)
+         (Token.kind_to_string tok.Token.kind))
 
-type assoc = Left | Right | NonAssoc
+let binding_power = function
+  | Token.Op_pipe -> (1, 2)
+  | Token.Op_or -> (3, 4)
+  | Token.Op_and -> (5, 6)
+  | Token.Op_eq | Token.Op_neq | Token.Op_lt | Token.Op_le | Token.Op_gt
+  | Token.Op_ge ->
+      (7, 8)
+  | Token.Op_cons -> (10, 9)
+  | Token.Op_add | Token.Op_sub -> (11, 12)
+  | Token.Op_mul | Token.Op_div | Token.Op_mod -> (13, 14)
 
-type op_info = {
-  precedence : int;
-  assoc : assoc;
-  binop : Ast.binop option;
-}
-
-let infix_info tok : op_info option =
-  match tok.Token.kind with
-  | Token.Punct Token.PipePipe | Token.Operator "||" ->
-      Some { precedence = 10; assoc = Right; binop = Some Ast.Or }
-  | Token.Punct Token.AmpAmp | Token.Operator "&&" ->
-      Some { precedence = 20; assoc = Right; binop = Some Ast.And }
-  | Token.Punct Token.Eq | Token.Operator "=" ->
-      Some { precedence = 30; assoc = Left; binop = Some Ast.Eq }
-  | Token.Punct Token.Neq | Token.Operator "<>" | Token.Operator "!=" ->
-      Some { precedence = 30; assoc = Left; binop = Some Ast.Neq }
-  | Token.Punct Token.Lt | Token.Operator "<" ->
-      Some { precedence = 30; assoc = Left; binop = Some Ast.Lt }
-  | Token.Punct Token.Le | Token.Operator "<=" ->
-      Some { precedence = 30; assoc = Left; binop = Some Ast.Le }
-  | Token.Punct Token.Gt | Token.Operator ">" ->
-      Some { precedence = 30; assoc = Left; binop = Some Ast.Gt }
-  | Token.Punct Token.Ge | Token.Operator ">=" ->
-      Some { precedence = 30; assoc = Left; binop = Some Ast.Ge }
-  | Token.Punct Token.ColonColon | Token.Operator "::" ->
-      Some { precedence = 40; assoc = Right; binop = Some Ast.Cons }
-  | Token.Operator "@" ->
-      Some { precedence = 40; assoc = Right; binop = Some Ast.Append }
-  | Token.Punct Token.Plus | Token.Operator "+" ->
-      Some { precedence = 50; assoc = Left; binop = Some Ast.Add }
-  | Token.Punct Token.Minus | Token.Operator "-" ->
-      Some { precedence = 50; assoc = Left; binop = Some Ast.Sub }
-  | Token.Punct Token.Star | Token.Operator "*" ->
-      Some { precedence = 60; assoc = Left; binop = Some Ast.Mul }
-  | Token.Punct Token.Slash | Token.Operator "/" ->
-      Some { precedence = 60; assoc = Left; binop = Some Ast.Div }
-  | Token.Punct Token.Percent | Token.Operator "%" ->
-      Some { precedence = 60; assoc = Left; binop = Some Ast.Mod }
-  | Token.Operator "|>" ->
-      Some { precedence = 5; assoc = Left; binop = Some Ast.Pipe }
-  | Token.Punct Token.AtAt | Token.Operator "@@" ->
-      Some { precedence = 5; assoc = Right; binop = Some Ast.Apply }
-  | Token.Operator ">>" ->
-      Some { precedence = 15; assoc = Left; binop = Some Ast.Compose }
-  | Token.Punct Token.Semicolon ->
-      Some { precedence = 1; assoc = Right; binop = None }
+let current_binop p =
+  match (current p).Token.kind with
+  | Token.Binop op -> Some op
+  | Token.Equal -> Some Token.Op_eq
   | _ -> None
 
-let parse_int_lit raw =
-  try Int64.of_string raw with Failure _ -> 0L
+let rec parse_ty p =
+  let left = parse_ty_atom p in
+  if consume_kind p Token.Arrow then
+    let right = parse_ty p in
+    Ast.ty (Ast.Ty_arrow (left, right))
+      (Span.merge left.Ast.ty_span right.Ast.ty_span)
+  else left
 
-let parse_float_lit raw =
-  try float_of_string raw with Failure _ -> 0.0
-
-let is_pattern_atom_start = function
-  | Token.Ident _ | Token.UpperIdent _ | Token.Punct Token.Underscore
-  | Token.Lit_int _ | Token.Lit_float _ | Token.Lit_string _ | Token.Lit_char _
-  | Token.Keyword (Token.Kw_true | Token.Kw_false)
-  | Token.Punct Token.LParen | Token.Punct Token.LBracket
-  | Token.Punct Token.LBrace ->
-      true
-  | _ -> false
-
-let is_atom_start tok =
-  match tok.Token.kind with
-  | Token.Ident _ | Token.UpperIdent _
-  | Token.Lit_int _ | Token.Lit_float _ | Token.Lit_string _ | Token.Lit_char _
-  | Token.Keyword (Token.Kw_true | Token.Kw_false)
-  | Token.Punct Token.LParen | Token.Punct Token.LBracket
-  | Token.Punct Token.LBrace ->
-      true
-  | _ -> false
-
-let rec parse_type_atom p =
+and parse_ty_atom p =
   let tok = current p in
   match tok.Token.kind with
   | Token.Ident name when String.length name > 0 && name.[0] = '\'' ->
       ignore (advance p);
-      Ast.tvar (Ident.Intern.intern name) tok.Token.span
-  | Token.Ident name | Token.UpperIdent name ->
+      Ast.ty (Ast.Ty_var (Ident.Intern.intern name)) tok.Token.span
+  | Token.Ident name | Token.Ctor name ->
       ignore (advance p);
-      let base = Ast.tcon (Ident.Intern.intern name) tok.Token.span in
-      parse_type_app_tail p base
-  | Token.Punct Token.LParen ->
+      let id = Ident.Intern.intern name in
+      if consume_kind p Token.LParen then (
+        let args = ref [] in
+        if not (check_kind p Token.RParen) then (
+          args := parse_ty p :: !args;
+          while consume_kind p Token.Comma do
+            args := parse_ty p :: !args
+          done);
+        ignore (expect_kind p Token.RParen);
+        Ast.ty (Ast.Ty_named (id, List.rev !args)) tok.Token.span)
+      else Ast.ty (Ast.Ty_named (id, [])) tok.Token.span
+  | Token.LParen ->
       ignore (advance p);
-      if check_punct p Token.RParen then (
-        ignore (advance p);
-        Ast.tcon (Ident.Intern.intern "unit") tok.Token.span)
+      if consume_kind p Token.RParen then Ast.ty Ast.Ty_unit tok.Token.span
       else
-        let first = parse_type p in
-        if check_punct p Token.Comma then (
-          let rest = ref [] in
-          while consume_punct p Token.Comma do
-            rest := parse_type p :: !rest
+        let t0 = parse_ty p in
+        if consume_kind p Token.Comma then (
+          let ts = ref [ t0 ] in
+          ts := parse_ty p :: !ts;
+          while consume_kind p Token.Comma do
+            ts := parse_ty p :: !ts
           done;
-          ignore (expect_punct p Token.RParen);
-          let ts = first :: List.rev !rest in
-          Ast.ttuple ts (Span.merge tok.Token.span (current p).Token.span))
+          ignore (expect_kind p Token.RParen);
+          Ast.ty (Ast.Ty_tuple (List.rev !ts)) tok.Token.span)
         else (
-          ignore (expect_punct p Token.RParen);
-          first)
-  | Token.Punct Token.LBrace -> parse_type_record p
-  | Token.Punct Token.LBracket ->
-      ignore (advance p);
-      let inner = parse_type p in
-      ignore (expect_punct p Token.RBracket);
-      Ast.tarray inner (Span.merge tok.Token.span (current p).Token.span)
-  | _ ->
-      error p tok.Token.span "expected type";
-      ignore (advance p);
-      Ast.tvar (Ident.Intern.intern "_") tok.Token.span
+          ignore (expect_kind p Token.RParen);
+          t0)
+  | _ -> fail tok.Token.span "expected type"
 
-and parse_type_app_tail p base =
-  let rec loop acc =
-    match (current p).Token.kind with
-    | Token.Ident _ | Token.UpperIdent _
-    | Token.Punct Token.LParen | Token.Punct Token.LBrace
-    | Token.Punct Token.LBracket ->
-        loop (parse_type_atom p :: acc)
-    | _ -> List.rev acc
-  in
-  match loop [] with
-  | [] -> base
-  | args ->
-      let span =
-        Span.merge base.Ast.typ_span (List.hd (List.rev args)).Ast.typ_span
-      in
-      Ast.tapp base args span
+let is_pat_atom tok =
+  match tok.Token.kind with
+  | Token.Ident _ | Token.Ctor _ | Token.Int _ | Token.Float _ | Token.String _
+  | Token.Char _
+  | Token.Keyword (Token.Kw_true | Token.Kw_false)
+  | Token.LParen | Token.Underscore ->
+      true
+  | _ -> false
 
-and parse_type_record p =
-  let start = current p in
-  ignore (expect_punct p Token.LBrace);
-  let fields = ref [] in
-  if not (check_punct p Token.RBrace) then (
-    let rec loop () =
-      let mutable_ = consume_kw p Token.Kw_mutable in
-      let name_tok = current p in
-      let name =
-        match name_tok.Token.kind with
-        | Token.Ident n ->
-            ignore (advance p);
-            Ident.Intern.intern n
-        | _ ->
-            error p name_tok.Token.span "expected field name";
-            Ident.Intern.intern "_"
-      in
-      ignore (expect_punct p Token.Colon);
-      let ty = parse_type p in
-      fields := (name, ty, mutable_) :: !fields;
-      if consume_punct p Token.Semicolon && not (check_punct p Token.RBrace)
-      then loop ()
-    in
-    loop ());
-  let end_tok =
-    match expect_punct p Token.RBrace with Ok t -> t | Error t -> t
-  in
-  Ast.typ (Ast.Typ_record (List.rev !fields))
-    (Span.merge start.Token.span end_tok.Token.span)
-
-and parse_type p =
-  let left = parse_type_atom p in
-  if consume_punct p Token.Arrow then
-    let right = parse_type p in
-    Ast.tarrow left right (Span.merge left.Ast.typ_span right.Ast.typ_span)
-  else left
-
-and parse_pattern p = parse_pattern_or p
-
-and parse_pattern_or p =
-  let left = parse_pattern_as p in
-  if consume_punct p Token.Pipe then
-    let right = parse_pattern_or p in
-    Ast.por left right (Span.merge left.Ast.pat_span right.Ast.pat_span)
-  else left
-
-and parse_pattern_as p =
-  let left = parse_pattern_cons p in
-  if consume_kw p Token.Kw_as then (
-    let name_tok = current p in
-    match name_tok.Token.kind with
-    | Token.Ident n ->
-        ignore (advance p);
-        Ast.pas left (Ident.Intern.intern n)
-          (Span.merge left.Ast.pat_span name_tok.Token.span)
-    | _ ->
-        error p name_tok.Token.span "expected identifier after 'as'";
-        left)
-  else left
-
-and parse_pattern_cons p =
-  let left = parse_pattern_annot p in
-  if check_punct p Token.ColonColon then (
-    ignore (advance p);
-    let right = parse_pattern_cons p in
-    Ast.pcons left right (Span.merge left.Ast.pat_span right.Ast.pat_span))
-  else left
-
-and parse_pattern_annot p =
+let rec parse_pattern p =
   let left = parse_pattern_atom p in
-  if check_punct p Token.Colon then (
+  if
+    match (current p).Token.kind with
+    | Token.Binop Token.Op_cons -> true
+    | _ -> false
+  then (
     ignore (advance p);
-    let ty = parse_type p in
-    Ast.pann left ty (Span.merge left.Ast.pat_span ty.Ast.typ_span))
+    let right = parse_pattern p in
+    Ast.pat
+      (Ast.Pat_ctor (Ident.Intern.intern "Cons", [ left; right ]))
+      (Span.merge left.Ast.pat_span right.Ast.pat_span))
+  else if consume_kw p Token.Kw_as then (
+    let ntok = advance p in
+    match ntok.Token.kind with
+    | Token.Ident n ->
+        Ast.pat
+          (Ast.Pat_as (left, Ident.Intern.intern n))
+          (Span.merge left.Ast.pat_span ntok.Token.span)
+    | _ -> fail ntok.Token.span "expected identifier after as")
   else left
 
 and parse_pattern_atom p =
   let tok = current p in
   match tok.Token.kind with
-  | Token.Punct Token.Underscore ->
+  | Token.Underscore ->
       ignore (advance p);
-      Ast.pwildcard tok.Token.span
+      Ast.pat Ast.Pat_wild tok.Token.span
   | Token.Ident name ->
       ignore (advance p);
-      Ast.pvar (Ident.Intern.intern name) tok.Token.span
-  | Token.UpperIdent name ->
+      Ast.pat (Ast.Pat_var (Ident.Intern.intern name)) tok.Token.span
+  | Token.Ctor name ->
       ignore (advance p);
       let id = Ident.Intern.intern name in
-      let args = parse_pattern_constructor_args p in
-      let span =
-        match args with
-        | [] -> tok.Token.span
-        | xs -> Span.merge tok.Token.span (List.hd (List.rev xs)).Ast.pat_span
+      let args =
+        if check_kind p Token.LParen then (
+          ignore (advance p);
+          let xs = ref [] in
+          if not (check_kind p Token.RParen) then (
+            xs := parse_pattern p :: !xs;
+            while consume_kind p Token.Comma do
+              xs := parse_pattern p :: !xs
+            done);
+          ignore (expect_kind p Token.RParen);
+          List.rev !xs)
+        else []
       in
-      Ast.pconstruct id args span
-  | Token.Lit_int s ->
+      Ast.pat (Ast.Pat_ctor (id, args)) tok.Token.span
+  | Token.Int n ->
       ignore (advance p);
-      Ast.plit (Ast.Lit_int (parse_int_lit s)) tok.Token.span
-  | Token.Lit_float s ->
+      Ast.pat (Ast.Pat_lit (Ast.Lit_int n)) tok.Token.span
+  | Token.Float f ->
       ignore (advance p);
-      Ast.plit (Ast.Lit_float (parse_float_lit s)) tok.Token.span
-  | Token.Lit_string s ->
+      Ast.pat (Ast.Pat_lit (Ast.Lit_float f)) tok.Token.span
+  | Token.String s ->
       ignore (advance p);
-      Ast.plit (Ast.Lit_string s) tok.Token.span
-  | Token.Lit_char c ->
+      Ast.pat (Ast.Pat_lit (Ast.Lit_string s)) tok.Token.span
+  | Token.Char c ->
       ignore (advance p);
-      Ast.plit (Ast.Lit_char c) tok.Token.span
+      Ast.pat (Ast.Pat_lit (Ast.Lit_char c)) tok.Token.span
   | Token.Keyword Token.Kw_true ->
       ignore (advance p);
-      Ast.plit (Ast.Lit_bool true) tok.Token.span
+      Ast.pat (Ast.Pat_lit (Ast.Lit_bool true)) tok.Token.span
   | Token.Keyword Token.Kw_false ->
       ignore (advance p);
-      Ast.plit (Ast.Lit_bool false) tok.Token.span
-  | Token.Punct Token.LParen -> parse_pattern_paren p
-  | Token.Punct Token.LBracket -> parse_pattern_list p
-  | Token.Punct Token.LBrace -> parse_pattern_record p
-  | _ ->
-      error p tok.Token.span "expected pattern";
+      Ast.pat (Ast.Pat_lit (Ast.Lit_bool false)) tok.Token.span
+  | Token.LParen ->
       ignore (advance p);
-      Ast.pwildcard tok.Token.span
-
-and parse_pattern_constructor_args p =
-  let rec loop acc =
-    if is_pattern_atom_start (current p).Token.kind then
-      loop (parse_pattern_atom p :: acc)
-    else List.rev acc
-  in
-  loop []
-
-and parse_pattern_paren p =
-  let start = current p in
-  ignore (advance p);
-  if check_punct p Token.RParen then (
-    ignore (advance p);
-    Ast.plit Ast.Lit_unit start.Token.span)
-  else
-    let first = parse_pattern p in
-    if check_punct p Token.Comma then (
-      let rest = ref [] in
-      while consume_punct p Token.Comma do
-        rest := parse_pattern p :: !rest
-      done;
-      ignore (expect_punct p Token.RParen);
-      Ast.ptuple (first :: List.rev !rest)
-        (Span.merge start.Token.span (current p).Token.span))
-    else (
-      ignore (expect_punct p Token.RParen);
-      first)
-
-and parse_pattern_list p =
-  let start = current p in
-  ignore (advance p);
-  if check_punct p Token.RBracket then (
-    let end_tok = advance p in
-    Ast.plist [] (Span.merge start.Token.span end_tok.Token.span))
-  else
-    let items = ref [ parse_pattern p ] in
-    while consume_punct p Token.Semicolon do
-      if not (check_punct p Token.RBracket) then
-        items := parse_pattern p :: !items
-    done;
-    let end_tok =
-      match expect_punct p Token.RBracket with Ok t -> t | Error t -> t
-    in
-    Ast.plist (List.rev !items) (Span.merge start.Token.span end_tok.Token.span)
-
-and parse_pattern_record p =
-  let start = current p in
-  ignore (advance p);
-  let fields = ref [] in
-  let open_ = ref false in
-  if not (check_punct p Token.RBrace) then (
-    let rec loop () =
-      if check_punct p Token.DotDot then (
-        ignore (advance p);
-        open_ := true)
+      if consume_kind p Token.RParen then
+        Ast.pat (Ast.Pat_lit Ast.Lit_unit) tok.Token.span
       else
-        match (current p).Token.kind with
-        | Token.Ident n ->
-            ignore (advance p);
-            let id = Ident.Intern.intern n in
-            let pat_opt =
-              if consume_punct p Token.Eq then Some (parse_pattern p) else None
-            in
-            fields := (id, pat_opt) :: !fields;
-            if consume_punct p Token.Semicolon && not (check_punct p Token.RBrace)
-            then loop ()
-        | _ -> error p (current p).Token.span "expected field name in pattern"
-    in
-    loop ());
-  let end_tok =
-    match expect_punct p Token.RBrace with Ok t -> t | Error t -> t
-  in
-  Ast.pat
-    (Ast.Pat_record (List.rev !fields, !open_))
-    (Span.merge start.Token.span end_tok.Token.span)
+        let first = parse_pattern p in
+        if consume_kind p Token.Comma then (
+          let ps = ref [ first ] in
+          ps := parse_pattern p :: !ps;
+          while consume_kind p Token.Comma do
+            ps := parse_pattern p :: !ps
+          done;
+          ignore (expect_kind p Token.RParen);
+          Ast.pat (Ast.Pat_tuple (List.rev !ps)) tok.Token.span)
+        else (
+          ignore (expect_kind p Token.RParen);
+          first)
+  | _ -> fail tok.Token.span "expected pattern"
 
-and parse_expr p = parse_expr_bp p 0
+let is_atom_start tok =
+  match tok.Token.kind with
+  | Token.Ident _ | Token.Ctor _ | Token.Int _ | Token.Float _ | Token.String _
+  | Token.Char _
+  | Token.Keyword (Token.Kw_true | Token.Kw_false)
+  | Token.LParen ->
+      true
+  | _ -> false
 
-and parse_expr_bp p min_bp =
-  let left = ref (parse_prefix p) in
-  let continue = ref true in
-  while !continue do
-    let tok = current p in
-    if is_atom_start tok && min_bp <= 80 then (
-      let arg = parse_prefix p in
-      let span = Span.merge !left.Ast.exp_span arg.Ast.exp_span in
-      match !left.Ast.exp_desc with
-      | Ast.Exp_app (f, args) -> left := Ast.app f (args @ [ arg ]) span
-      | Ast.Exp_constructor (name, args) ->
-          left := Ast.exp (Ast.Exp_constructor (name, args @ [ arg ])) span
-      | _ -> left := Ast.app !left [ arg ] span)
-    else
-      match infix_info tok with
-      | Some info when info.precedence >= min_bp -> (
-          ignore (advance p);
-          match info.binop with
-          | None ->
-              let right = parse_expr_bp p info.precedence in
-              left :=
-                Ast.seq !left right
-                  (Span.merge !left.Ast.exp_span right.Ast.exp_span)
-          | Some Ast.Cons ->
-              let right = parse_expr_bp p info.precedence in
-              left :=
-                Ast.cons !left right
-                  (Span.merge !left.Ast.exp_span right.Ast.exp_span)
-          | Some op ->
-              let next_bp =
-                match info.assoc with
-                | Left | NonAssoc -> info.precedence + 1
-                | Right -> info.precedence
-              in
-              let right = parse_expr_bp p next_bp in
-              left :=
-                Ast.binop op !left right
-                  (Span.merge !left.Ast.exp_span right.Ast.exp_span))
-      | Some _ -> continue := false
-      | None ->
-          if check_punct p Token.Dot then (
-            ignore (advance p);
-            let field_tok = current p in
-            match field_tok.Token.kind with
-            | Token.Ident n | Token.UpperIdent n ->
-                ignore (advance p);
-                left :=
-                  Ast.field !left (Ident.Intern.intern n)
-                    (Span.merge !left.Ast.exp_span field_tok.Token.span)
-            | _ ->
-                error p field_tok.Token.span "expected field name";
-                continue := false)
-          else if check_punct p Token.LBracket then (
-            ignore (advance p);
-            let idx = parse_expr p in
-            ignore (expect_punct p Token.RBracket);
-            left :=
-              Ast.index !left idx
-                (Span.merge !left.Ast.exp_span idx.Ast.exp_span))
-          else if check_punct p Token.Colon && min_bp <= 2 then (
-            ignore (advance p);
-            let ty = parse_type p in
-            left :=
-              Ast.annotated !left ty
-                (Span.merge !left.Ast.exp_span ty.Ast.typ_span))
-          else continue := false
+let rec parse_expr p = parse_binary p 0
+
+and parse_binary p min_bp =
+  let left = ref (parse_app p) in
+  let cont = ref true in
+  while !cont do
+    match current_binop p with
+    | Some op when fst (binding_power op) >= min_bp ->
+        ignore (advance p);
+        let _, rbp = binding_power op in
+        let right = parse_binary p rbp in
+        left :=
+          Ast.expr
+            (Ast.Expr_bin (op, !left, right))
+            (Span.merge !left.Ast.expr_span right.Ast.expr_span)
+    | _ -> cont := false
   done;
   !left
 
-and parse_prefix p =
+and parse_app p =
+  let left = ref (parse_unary p) in
+  while is_atom_start (current p) do
+    let arg = parse_atom p in
+    left :=
+      (match !left.Ast.expr_desc with
+      | Ast.Expr_app (f, args) ->
+          Ast.expr
+            (Ast.Expr_app (f, args @ [ arg ]))
+            (Span.merge !left.Ast.expr_span arg.Ast.expr_span)
+      | _ ->
+          Ast.expr
+            (Ast.Expr_app (!left, [ arg ]))
+            (Span.merge !left.Ast.expr_span arg.Ast.expr_span))
+  done;
+  !left
+
+and parse_unary p =
   let tok = current p in
   match tok.Token.kind with
-  | Token.Punct Token.Minus ->
+  | Token.Binop Token.Op_sub ->
       ignore (advance p);
-      let e = parse_expr_bp p 70 in
-      Ast.unop Ast.Neg e (Span.merge tok.Token.span e.Ast.exp_span)
-  | Token.Punct Token.Bang ->
+      let e = parse_unary p in
+      Ast.expr
+        (Ast.Expr_un (Token.Op_neg, e))
+        (Span.merge tok.Token.span e.Ast.expr_span)
+  | Token.Keyword Token.Kw_not | Token.Ident "not" ->
       ignore (advance p);
-      let e = parse_expr_bp p 70 in
-      Ast.unop Ast.Deref e (Span.merge tok.Token.span e.Ast.exp_span)
-  | Token.Ident "not" ->
-      ignore (advance p);
-      let e = parse_expr_bp p 70 in
-      Ast.unop Ast.Not e (Span.merge tok.Token.span e.Ast.exp_span)
+      let e = parse_unary p in
+      Ast.expr
+        (Ast.Expr_un (Token.Op_not, e))
+        (Span.merge tok.Token.span e.Ast.expr_span)
   | Token.Keyword Token.Kw_if -> parse_if p
   | Token.Keyword Token.Kw_match -> parse_match p
-  | Token.Keyword (Token.Kw_fun | Token.Kw_fn) -> parse_fun p
+  | Token.Keyword (Token.Kw_fun | Token.Kw_fn) -> parse_lambda p
   | Token.Keyword Token.Kw_let -> parse_let_expr p
   | _ -> parse_atom p
 
 and parse_atom p =
   let tok = current p in
   match tok.Token.kind with
-  | Token.Lit_int s ->
+  | Token.Int n ->
       ignore (advance p);
-      Ast.lit (Ast.Lit_int (parse_int_lit s)) tok.Token.span
-  | Token.Lit_float s ->
+      Ast.expr (Ast.Expr_lit (Ast.Lit_int n)) tok.Token.span
+  | Token.Float f ->
       ignore (advance p);
-      Ast.lit (Ast.Lit_float (parse_float_lit s)) tok.Token.span
-  | Token.Lit_string s ->
+      Ast.expr (Ast.Expr_lit (Ast.Lit_float f)) tok.Token.span
+  | Token.String s ->
       ignore (advance p);
-      Ast.lit (Ast.Lit_string s) tok.Token.span
-  | Token.Lit_char c ->
+      Ast.expr (Ast.Expr_lit (Ast.Lit_string s)) tok.Token.span
+  | Token.Char c ->
       ignore (advance p);
-      Ast.lit (Ast.Lit_char c) tok.Token.span
+      Ast.expr (Ast.Expr_lit (Ast.Lit_char c)) tok.Token.span
   | Token.Keyword Token.Kw_true ->
       ignore (advance p);
-      Ast.lit (Ast.Lit_bool true) tok.Token.span
+      Ast.expr (Ast.Expr_lit (Ast.Lit_bool true)) tok.Token.span
   | Token.Keyword Token.Kw_false ->
       ignore (advance p);
-      Ast.lit (Ast.Lit_bool false) tok.Token.span
+      Ast.expr (Ast.Expr_lit (Ast.Lit_bool false)) tok.Token.span
   | Token.Ident name ->
       ignore (advance p);
-      Ast.var (Ident.Intern.intern name) tok.Token.span
-  | Token.UpperIdent name ->
+      Ast.expr (Ast.Expr_var (Ident.Intern.intern name)) tok.Token.span
+  | Token.Ctor name ->
       ignore (advance p);
-      Ast.construct (Ident.Intern.intern name) [] tok.Token.span
-  | Token.Punct Token.LParen -> parse_paren_expr p
-  | Token.Punct Token.LBracket -> parse_list_expr p
-  | Token.Punct Token.LBrace -> parse_record_expr p
+      Ast.expr (Ast.Expr_ctor (Ident.Intern.intern name)) tok.Token.span
+  | Token.LParen ->
+      ignore (advance p);
+      if consume_kind p Token.RParen then
+        Ast.expr (Ast.Expr_lit Ast.Lit_unit) tok.Token.span
+      else
+        let first = parse_expr p in
+        if consume_kind p Token.Comma then (
+          let es = ref [ first ] in
+          es := parse_expr p :: !es;
+          while consume_kind p Token.Comma do
+            es := parse_expr p :: !es
+          done;
+          ignore (expect_kind p Token.RParen);
+          Ast.expr (Ast.Expr_tuple (List.rev !es)) tok.Token.span)
+        else (
+          ignore (expect_kind p Token.RParen);
+          first)
   | _ ->
-      error p tok.Token.span
-        (Printf.sprintf "unexpected token '%s' in expression"
-           (Token.kind_to_string tok.Token.kind));
-      ignore (advance p);
-      Ast.unit tok.Token.span
-
-and parse_paren_expr p =
-  let start = current p in
-  ignore (advance p);
-  if check_punct p Token.RParen then (
-    let end_tok = advance p in
-    Ast.unit (Span.merge start.Token.span end_tok.Token.span))
-  else
-    let first = parse_expr p in
-    if check_punct p Token.Comma then (
-      let items = ref [ first ] in
-      while consume_punct p Token.Comma do
-        items := parse_expr p :: !items
-      done;
-      ignore (expect_punct p Token.RParen);
-      let es = List.rev !items in
-      Ast.tuple es
-        (Span.merge start.Token.span (List.hd (List.rev es)).Ast.exp_span))
-    else (
-      ignore (expect_punct p Token.RParen);
-      first)
-
-and parse_list_expr p =
-  let start = current p in
-  ignore (advance p);
-  if check_punct p Token.RBracket then (
-    let end_tok = advance p in
-    Ast.list [] (Span.merge start.Token.span end_tok.Token.span))
-  else
-    let items = ref [ parse_expr p ] in
-    while consume_punct p Token.Semicolon do
-      if not (check_punct p Token.RBracket) then
-        items := parse_expr p :: !items
-    done;
-    let end_tok =
-      match expect_punct p Token.RBracket with Ok t -> t | Error t -> t
-    in
-    Ast.list (List.rev !items) (Span.merge start.Token.span end_tok.Token.span)
-
-and parse_record_expr p =
-  let start = current p in
-  ignore (advance p);
-  if check_punct p Token.RBrace then (
-    let end_tok = advance p in
-    Ast.record [] (Span.merge start.Token.span end_tok.Token.span))
-  else
-    let tok = current p in
-    let is_field_start =
-      match tok.Token.kind with
-      | Token.Ident _ -> (
-          match (peek_n p 1).Token.kind with
-          | Token.Punct Token.Eq | Token.Punct Token.Semicolon
-          | Token.Punct Token.RBrace ->
-              true
-          | _ -> false)
-      | _ -> false
-    in
-    if is_field_start then parse_record_fields p start
-    else
-      let base = parse_expr p in
-      if consume_kw p Token.Kw_with then parse_record_update p start base
-      else (
-        error p start.Token.span "expected record fields";
-        ignore (expect_punct p Token.RBrace);
-        Ast.record [] start.Token.span)
-
-and parse_record_fields p start =
-  let fields = ref [] in
-  let rec loop () =
-    match (current p).Token.kind with
-    | Token.Ident n ->
-        ignore (advance p);
-        ignore (expect_punct p Token.Eq);
-        let e = parse_expr p in
-        fields := (Ident.Intern.intern n, e) :: !fields;
-        if consume_punct p Token.Semicolon && not (check_punct p Token.RBrace)
-        then loop ()
-    | _ -> error p (current p).Token.span "expected field name"
-  in
-  loop ();
-  let end_tok =
-    match expect_punct p Token.RBrace with Ok t -> t | Error t -> t
-  in
-  Ast.record (List.rev !fields)
-    (Span.merge start.Token.span end_tok.Token.span)
-
-and parse_record_update p start base =
-  let fields = ref [] in
-  let rec loop () =
-    match (current p).Token.kind with
-    | Token.Ident n ->
-        ignore (advance p);
-        ignore (expect_punct p Token.Eq);
-        let e = parse_expr p in
-        fields := (Ident.Intern.intern n, e) :: !fields;
-        if consume_punct p Token.Semicolon && not (check_punct p Token.RBrace)
-        then loop ()
-    | _ -> error p (current p).Token.span "expected field name"
-  in
-  if not (check_punct p Token.RBrace) then loop ();
-  let end_tok =
-    match expect_punct p Token.RBrace with Ok t -> t | Error t -> t
-  in
-  Ast.exp
-    (Ast.Exp_record_update (base, List.rev !fields))
-    (Span.merge start.Token.span end_tok.Token.span)
+      fail tok.Token.span
+        (Printf.sprintf "unexpected token %s"
+           (Token.kind_to_string tok.Token.kind))
 
 and parse_if p =
-  let start = current p in
-  ignore (expect_kw p Token.Kw_if);
+  let start = expect_kw p Token.Kw_if in
   let cond = parse_expr p in
   ignore (expect_kw p Token.Kw_then);
   let then_ = parse_expr p in
-  let else_ =
-    if consume_kw p Token.Kw_else then Some (parse_expr p) else None
-  in
-  let end_span =
-    match else_ with Some e -> e.Ast.exp_span | None -> then_.Ast.exp_span
-  in
-  Ast.if_ cond then_ else_ (Span.merge start.Token.span end_span)
+  ignore (expect_kw p Token.Kw_else);
+  let else_ = parse_expr p in
+  Ast.expr
+    (Ast.Expr_if (cond, then_, else_))
+    (Span.merge start.Token.span else_.Ast.expr_span)
 
 and parse_match p =
-  let start = current p in
-  ignore (expect_kw p Token.Kw_match);
+  let start = expect_kw p Token.Kw_match in
   let scrut = parse_expr p in
   ignore (expect_kw p Token.Kw_with);
-  ignore (consume_punct p Token.Pipe);
+  ignore (consume_kind p Token.Pipe);
   let cases = ref [ parse_case p ] in
-  while check_punct p Token.Pipe do
+  while check_kind p Token.Pipe do
     ignore (advance p);
     cases := parse_case p :: !cases
   done;
   let cases = List.rev !cases in
-  let end_span =
-    match List.rev cases with
-    | c :: _ -> c.Ast.case_span
-    | [] -> scrut.Ast.exp_span
-  in
-  Ast.match_ scrut cases (Span.merge start.Token.span end_span)
+  Ast.expr
+    (Ast.Expr_match (scrut, cases))
+    (Span.merge start.Token.span (List.hd (List.rev cases)).Ast.case_span)
 
 and parse_case p =
   let start = current p in
@@ -692,335 +369,228 @@ and parse_case p =
   let guard =
     if consume_kw p Token.Kw_when then Some (parse_expr p) else None
   in
-  ignore (expect_punct p Token.Arrow);
+  ignore (expect_kind p Token.Arrow);
   let body = parse_expr p in
-  Ast.case ~guard pat body (Span.merge start.Token.span body.Ast.exp_span)
+  {
+    Ast.case_pat = pat;
+    case_guard = guard;
+    case_body = body;
+    case_span = Span.merge start.Token.span body.Ast.expr_span;
+  }
 
-and parse_fun p =
-  let start = current p in
-  ignore (advance p);
+and parse_lambda p =
+  let start = advance p in
   let params = ref [] in
-  while is_pattern_atom_start (current p).Token.kind do
-    params := parse_pattern_atom p :: !params
+  while
+    match (current p).Token.kind with
+    | Token.Ident _ -> true
+    | _ -> false
+  do
+    let tok = advance p in
+    match tok.Token.kind with
+    | Token.Ident n ->
+        params :=
+          {
+            Ast.param_name = Ident.Intern.intern n;
+            param_ty = None;
+            param_span = tok.Token.span;
+          }
+          :: !params
+    | _ -> ()
   done;
-  if not (consume_punct p Token.Arrow || consume_punct p Token.FatArrow) then
-    error p (current p).Token.span "expected '->' or '=>' in function";
+  if not (consume_kind p Token.Arrow || consume_kind p Token.FatArrow) then
+    fail (current p).Token.span "expected -> in function";
   let body = parse_expr p in
-  Ast.abs (List.rev !params) body
-    (Span.merge start.Token.span body.Ast.exp_span)
+  Ast.expr
+    (Ast.Expr_lambda (List.rev !params, body))
+    (Span.merge start.Token.span body.Ast.expr_span)
 
 and parse_let_expr p =
-  let start = current p in
-  let vbs, is_rec = parse_let_bindings p in
+  let lb = parse_let_binding p in
   ignore (expect_kw p Token.Kw_in);
   let body = parse_expr p in
-  let span = Span.merge start.Token.span body.Ast.exp_span in
-  if is_rec then Ast.letrec vbs body span else Ast.let_ vbs body span
+  let span = Span.merge lb.Ast.lb_span body.Ast.expr_span in
+  if lb.Ast.lb_rec then Ast.expr (Ast.Expr_let_rec ([ lb ], body)) span
+  else Ast.expr (Ast.Expr_let (lb, body)) span
 
-and parse_let_bindings p =
-  ignore (expect_kw p Token.Kw_let);
+and parse_let_binding p =
+  let start = expect_kw p Token.Kw_let in
   let is_rec = consume_kw p Token.Kw_rec in
-  let first = parse_value_binding p ~is_rec in
-  let rest = ref [] in
-  while consume_kw p Token.Kw_and do
-    rest := parse_value_binding p ~is_rec :: !rest
-  done;
-  (first :: List.rev !rest, is_rec)
-
-and is_param_list_ahead p =
-  match (current p).Token.kind with
-  | Token.Ident _ -> (
-      match (peek_n p 1).Token.kind with
-      | Token.Punct Token.Eq | Token.Punct Token.Colon -> false
-      | k -> is_pattern_atom_start k)
-  | _ -> false
-
-and parse_value_binding p ~is_rec =
-  let start = current p in
-  if is_param_list_ahead p then (
-    let name_tok = advance p in
-    let name = Ident.Intern.intern name_tok.Token.raw in
-    let pat = Ast.pvar name name_tok.Token.span in
-    let params = ref [] in
-    while is_pattern_atom_start (current p).Token.kind do
-      params := parse_pattern_atom p :: !params
-    done;
-    ignore (expect_punct p Token.Eq);
-    let body = parse_expr p in
-    Ast.value_binding ~is_rec ~params:(List.rev !params) pat body
-      (Span.merge start.Token.span body.Ast.exp_span))
-  else (
-    let pat = parse_pattern p in
-    ignore (expect_punct p Token.Eq);
-    let body = parse_expr p in
-    Ast.value_binding ~is_rec pat body
-      (Span.merge start.Token.span body.Ast.exp_span))
-
-and parse_type_decl p =
-  let start = current p in
-  ignore (expect_kw p Token.Kw_type);
-  let first = parse_one_type_decl p start in
-  let rest = ref [] in
-  while consume_kw p Token.Kw_and do
-    rest := parse_one_type_decl p (current p) :: !rest
-  done;
-  first :: List.rev !rest
-
-and parse_type_params p =
-  let rec loop acc =
-    match (current p).Token.kind with
-    | Token.Ident name when String.length name > 0 && name.[0] = '\'' ->
-        ignore (advance p);
-        loop (Ident.Intern.intern name :: acc)
-    | Token.Ident name
-      when String.length name > 0
-           && name.[0] >= 'a'
-           && name.[0] <= 'z' ->
-        (* bare type variable style: type List a *)
-        ignore (advance p);
-        loop (Ident.Intern.intern name :: acc)
-    | Token.Punct Token.Apostrophe ->
-        ignore (advance p);
-        (match (current p).Token.kind with
-        | Token.Ident n ->
-            ignore (advance p);
-            loop (Ident.Intern.intern ("'" ^ n) :: acc)
-        | _ -> List.rev acc)
-    | _ -> List.rev acc
-  in
-  loop []
-
-and parse_one_type_decl p start =
-  let params_before = parse_type_params p in
-  let name_tok = current p in
+  let name_tok = advance p in
   let name =
     match name_tok.Token.kind with
-    | Token.UpperIdent n | Token.Ident n ->
-        ignore (advance p);
-        Ident.Intern.intern n
-    | _ ->
-        error p name_tok.Token.span "expected type name";
-        Ident.Intern.intern "_"
+    | Token.Ident n -> Ident.Intern.intern n
+    | _ -> fail name_tok.Token.span "expected binding name"
   in
-  let params_after = parse_type_params p in
-  let params = params_before @ params_after in
-  ignore (expect_punct p Token.Eq);
-  let kind = parse_type_kind p in
-  Ast.type_decl name params kind
-    (Span.merge start.Token.span name_tok.Token.span)
-
-and parse_type_kind p =
-  match (current p).Token.kind with
-  | Token.Punct Token.Pipe | Token.UpperIdent _ ->
-      ignore (consume_punct p Token.Pipe);
-      let ctors = ref [ parse_constructor_decl p ] in
-      while consume_punct p Token.Pipe do
-        ctors := parse_constructor_decl p :: !ctors
-      done;
-      Ast.Type_variant (List.rev !ctors)
-  | Token.Punct Token.LBrace -> (
-      let rec_ty = parse_type_record p in
-      match rec_ty.Ast.typ_desc with
-      | Ast.Typ_record fields -> Ast.Type_record fields
-      | _ -> Ast.Type_abbrev rec_ty)
-  | _ -> Ast.Type_abbrev (parse_type p)
-
-and parse_constructor_decl p =
-  let tok = current p in
-  let name =
-    match tok.Token.kind with
-    | Token.UpperIdent n | Token.Ident n ->
-        ignore (advance p);
-        Ident.Intern.intern n
-    | _ ->
-        error p tok.Token.span "expected constructor name";
-        Ident.Intern.intern "_"
-  in
-  let args =
-    if consume_kw p Token.Kw_of then (
-      let first = parse_type_atom p in
-      let rest = ref [] in
-      while consume_punct p Token.Star do
-        rest := parse_type_atom p :: !rest
-      done;
-      first :: List.rev !rest)
-    else
-      let rec loop acc =
-        match (current p).Token.kind with
-        | Token.Ident _ | Token.UpperIdent _ | Token.Punct Token.LParen
-        | Token.Punct Token.LBracket | Token.Punct Token.LBrace
-          when not (check_punct p Token.Pipe) ->
-            loop (parse_type_atom p :: acc)
-        | _ -> List.rev acc
-      in
-      loop []
-  in
-  let span =
-    match args with
-    | [] -> tok.Token.span
-    | xs -> Span.merge tok.Token.span (List.hd (List.rev xs)).Ast.typ_span
-  in
-  Ast.constructor_decl name args span
-
-and parse_mod_path p =
-  let rec loop acc =
+  let params = ref [] in
+  while
     match (current p).Token.kind with
-    | Token.UpperIdent n | Token.Ident n ->
-        ignore (advance p);
-        let id = Ident.Intern.intern n in
-        if consume_punct p Token.Dot then loop (id :: acc)
-        else List.rev (id :: acc)
-    | _ -> List.rev acc
-  in
-  loop []
-
-and parse_external p =
-  let start = current p in
-  ignore (expect_kw p Token.Kw_external);
-  let name_tok = current p in
-  let name =
-    match name_tok.Token.kind with
+    | Token.Ident _ | Token.LParen -> true
+    | _ -> false
+  do
+    match (current p).Token.kind with
     | Token.Ident n ->
+        let tok = advance p in
+        params :=
+          {
+            Ast.param_name = Ident.Intern.intern n;
+            param_ty = None;
+            param_span = tok.Token.span;
+          }
+          :: !params
+    | Token.LParen ->
         ignore (advance p);
-        Ident.Intern.intern n
-    | _ ->
-        error p name_tok.Token.span "expected external name";
-        Ident.Intern.intern "_"
-  in
-  ignore (expect_punct p Token.Colon);
-  let ty = parse_type p in
-  ignore (expect_punct p Token.Eq);
-  let prim_tok = current p in
-  let prim =
-    match prim_tok.Token.kind with
-    | Token.Lit_string s ->
-        ignore (advance p);
-        s
-    | _ ->
-        error p prim_tok.Token.span "expected string primitive name";
-        ""
-  in
-  ignore (consume_punct p Token.Semicolon);
-  Ast.Top_external
-    (name, ty, prim, Span.merge start.Token.span prim_tok.Token.span)
+        let ntok = advance p in
+        let pname =
+          match ntok.Token.kind with
+          | Token.Ident n -> Ident.Intern.intern n
+          | _ -> fail ntok.Token.span "expected parameter name"
+        in
+        let pty =
+          if consume_kind p Token.Colon then Some (parse_ty p) else None
+        in
+        ignore (expect_kind p Token.RParen);
+        params :=
+          {
+            Ast.param_name = pname;
+            param_ty = pty;
+            param_span = ntok.Token.span;
+          }
+          :: !params
+    | _ -> ()
+  done;
+  let ann = if consume_kind p Token.Colon then Some (parse_ty p) else None in
+  ignore (expect_kind p Token.Equal);
+  let body = parse_expr p in
+  {
+    Ast.lb_name = name;
+    lb_params = List.rev !params;
+    lb_ty = ann;
+    lb_body = body;
+    lb_span = Span.merge start.Token.span body.Ast.expr_span;
+    lb_rec = is_rec;
+  }
 
-and parse_module p =
-  let start = current p in
-  ignore (expect_kw p Token.Kw_module);
-  let name_tok = current p in
+let parse_type_def p =
+  let start = expect_kw p Token.Kw_type in
+  let name_tok = advance p in
   let name =
     match name_tok.Token.kind with
-    | Token.UpperIdent n | Token.Ident n ->
-        ignore (advance p);
-        Ident.Intern.intern n
-    | _ ->
-        error p name_tok.Token.span "expected module name";
-        Ident.Intern.intern "_"
+    | Token.Ident n | Token.Ctor n -> Ident.Intern.intern n
+    | _ -> fail name_tok.Token.span "expected type name"
   in
-  ignore (expect_punct p Token.Eq);
-  ignore (expect_punct p Token.LBrace);
-  let items = ref [] in
-  while (not (at_eof p)) && not (check_punct p Token.RBrace) do
-    let before = p.index in
-    items := parse_toplevel p :: !items;
-    if p.index = before then synchronize p
+  let params = ref [] in
+  while
+    match (current p).Token.kind with
+    | Token.Ident n when String.length n > 0 && n.[0] = '\'' -> true
+    | _ -> false
+  do
+    let tok = advance p in
+    match tok.Token.kind with
+    | Token.Ident n -> params := Ident.Intern.intern n :: !params
+    | _ -> ()
   done;
-  let end_tok =
-    match expect_punct p Token.RBrace with Ok t -> t | Error t -> t
+  ignore (expect_kind p Token.Equal);
+  ignore (consume_kind p Token.Pipe);
+  let parse_ctor () =
+    let tok = advance p in
+    let cname =
+      match tok.Token.kind with
+      | Token.Ctor n | Token.Ident n -> Ident.Intern.intern n
+      | _ -> fail tok.Token.span "expected constructor"
+    in
+    let args = ref [] in
+    if consume_kw p Token.Kw_of then (
+      args := parse_ty p :: !args;
+      let cont = ref true in
+      while !cont do
+        match (current p).Token.kind with
+        | Token.Binop Token.Op_mul | Token.Comma ->
+            ignore (advance p);
+            args := parse_ty p :: !args
+        | _ -> cont := false
+      done);
+    {
+      Ast.ctor_name = cname;
+      ctor_args = List.rev !args;
+      ctor_span = tok.Token.span;
+    }
   in
-  ignore (consume_punct p Token.Semicolon);
-  Ast.Top_module
-    (name, List.rev !items, Span.merge start.Token.span end_tok.Token.span)
+  let ctors = ref [ parse_ctor () ] in
+  while consume_kind p Token.Pipe do
+    ctors := parse_ctor () :: !ctors
+  done;
+  {
+    Ast.td_name = name;
+    td_params = List.rev !params;
+    td_ctors = List.rev !ctors;
+    td_span = Span.merge start.Token.span name_tok.Token.span;
+  }
 
-and parse_toplevel p =
-  let tok = current p in
-  match tok.Token.kind with
+let parse_item p =
+  match (current p).Token.kind with
+  | Token.Keyword Token.Kw_type -> Ast.Item_type (parse_type_def p)
   | Token.Keyword Token.Kw_let ->
-      let vbs, is_rec = parse_let_bindings p in
-      ignore (consume_punct p Token.Semicolon);
-      if is_rec then Ast.Top_letrec vbs else Ast.Top_let vbs
-  | Token.Keyword Token.Kw_type ->
-      let tds = parse_type_decl p in
-      ignore (consume_punct p Token.Semicolon);
-      Ast.Top_type tds
-  | Token.Keyword Token.Kw_open ->
-      ignore (advance p);
-      let path = parse_mod_path p in
-      ignore (consume_punct p Token.Semicolon);
-      Ast.Top_open (path, tok.Token.span)
-  | Token.Keyword Token.Kw_external -> parse_external p
-  | Token.Keyword Token.Kw_module -> parse_module p
-  | Token.Eof ->
-      error p tok.Token.span "unexpected end of file";
-      Ast.Top_expr (Ast.unit tok.Token.span)
+      let lb = parse_let_binding p in
+      if lb.Ast.lb_params <> [] then Ast.Item_fn lb else Ast.Item_let lb
+  | Token.Keyword (Token.Kw_external | Token.Kw_extern) ->
+      let start = advance p in
+      let name_tok = advance p in
+      let name =
+        match name_tok.Token.kind with
+        | Token.Ident n -> Ident.Intern.intern n
+        | _ -> fail name_tok.Token.span "expected extern name"
+      in
+      ignore (expect_kind p Token.Colon);
+      let ty = parse_ty p in
+      let rec peel acc t =
+        match t.Ast.ty_desc with
+        | Ast.Ty_arrow (a, b) -> peel (a :: acc) b
+        | _ -> (List.rev acc, t)
+      in
+      let params, ret = peel [] ty in
+      Ast.Item_extern
+        {
+          Ast.ext_name = name;
+          ext_params = params;
+          ext_ret = ret;
+          ext_span = Span.merge start.Token.span ty.Ast.ty_span;
+        }
   | _ ->
-      let e = parse_expr p in
-      ignore (consume_punct p Token.Semicolon);
-      Ast.Top_expr e
+      fail (current p).Token.span
+        (Printf.sprintf "expected top-level item, found %s"
+           (Token.kind_to_string (current p).Token.kind))
 
-let parse_program_items p =
+let parse_program_tokens ~file ~source tokens =
+  let p = create ~file ~source tokens in
   let items = ref [] in
-  while not (at_eof p) do
-    let before = p.index in
-    items := parse_toplevel p :: !items;
-    if p.index = before then synchronize p
+  while not (at_end p) do
+    while consume_kind p Token.Semicolon do
+      ()
+    done;
+    if not (at_end p) then items := parse_item p :: !items
   done;
-  List.rev !items
+  let items = List.rev !items in
+  let span =
+    match items with
+    | [] -> Span.dummy
+    | xs -> Span.merge_list (List.map Ast.span_of_item xs)
+  in
+  { Ast.items; span }
 
-let parse_tokens ~filename tokens =
-  let p = of_tokens ~filename tokens in
-  let items = parse_program_items p in
-  let prog = Ast.program items in
-  let diags = diagnostics p in
-  if List.exists (fun d -> d.Diagnostic.severity = Diagnostic.Error) diags then
-    Error diags
-  else Ok prog
+let wrap f = try Ok (f ()) with Error e -> Error e
 
-let parse_program filename source =
-  match Lexer.tokenize ~filename ~source () with
-  | Error diags -> Error diags
-  | Ok tokens -> parse_tokens ~filename tokens
+let parse_program ?(file = "<input>") source =
+  wrap (fun () ->
+      match Lexer.tokenize ~filename:file ~source () with
+      | Error diags ->
+          let d =
+            match diags with
+            | x :: _ -> x
+            | [] -> Diagnostic.error Span.dummy "lex error"
+          in
+          raise
+            (Error { message = d.Diagnostic.message; span = d.Diagnostic.span })
+      | Ok tokens -> parse_program_tokens ~file ~source tokens)
 
-let parse_expr_string filename source =
-  match Lexer.tokenize ~filename ~source () with
-  | Error diags -> Error diags
-  | Ok tokens ->
-      let p = of_tokens ~filename tokens in
-      let e = parse_expr p in
-      let diags = diagnostics p in
-      if List.exists (fun d -> d.Diagnostic.severity = Diagnostic.Error) diags
-      then Error diags
-      else Ok e
-
-let parse_type_string filename source =
-  match Lexer.tokenize ~filename ~source () with
-  | Error diags -> Error diags
-  | Ok tokens ->
-      let p = of_tokens ~filename tokens in
-      let t = parse_type p in
-      let diags = diagnostics p in
-      if List.exists (fun d -> d.Diagnostic.severity = Diagnostic.Error) diags
-      then Error diags
-      else Ok t
-
-let parse_pattern_string filename source =
-  match Lexer.tokenize ~filename ~source () with
-  | Error diags -> Error diags
-  | Ok tokens ->
-      let p = of_tokens ~filename tokens in
-      let pat = parse_pattern p in
-      let diags = diagnostics p in
-      if List.exists (fun d -> d.Diagnostic.severity = Diagnostic.Error) diags
-      then Error diags
-      else Ok pat
-
-let parse_type_decl_string filename source =
-  match Lexer.tokenize ~filename ~source () with
-  | Error diags -> Error diags
-  | Ok tokens ->
-      let p = of_tokens ~filename tokens in
-      let tds = parse_type_decl p in
-      let diags = diagnostics p in
-      if List.exists (fun d -> d.Diagnostic.severity = Diagnostic.Error) diags
-      then Error diags
-      else Ok tds
+let error_to_diagnostic (e : error) = Diagnostic.error e.span e.message
