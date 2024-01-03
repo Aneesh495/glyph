@@ -5,15 +5,13 @@ synopsis:
   "A typed functional language with an optimizing compiler and bytecode VM"
 description: """
 Glyph is a strict functional programming language implemented entirely in OCaml.
-It includes a hand-written lexer and parser, Hindley-Milner type inference with
-let-polymorphism, pattern compilation to decision trees, SSA-based mid-level IR,
-classic optimization passes, a register-based bytecode ISA, and a virtual machine
-with a semi-space copying garbage collector."""
+It includes a hand-written lexer and parser, Hindley-Milner type inference,
+pattern compilation, SSA mid-level IR, classical optimizations, a bytecode ISA,
+and a semi-space copying GC — see research/ for the deeper middle and back end."""
 maintainer: ["Aneesh Krishna"]
 authors: ["Aneesh Krishna"]
 license: "MIT"
 homepage: "https://github.com/Aneesh495/glyph"
-doc: "https://github.com/Aneesh495/glyph"
 bug-reports: "https://github.com/Aneesh495/glyph/issues"
 depends: [
   "ocaml" {>= "5.2"}

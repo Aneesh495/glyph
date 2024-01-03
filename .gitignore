@@ -1,48 +1,10 @@
-# Build / opam
 _build/
-_opam/
-*.opam.locked
-.opam/
-
-# Dune / OCaml artifacts
 *.install
-*.byte
-*.native
-*.exe
+.merlin
+.DS_Store
 *.cmo
 *.cmi
 *.cmx
-*.cma
-*.cmxa
-*.cmxs
-*.cmt
-*.cmti
-*.annot
-*.a
 *.o
-*.so
-*.dll
-.merlin
-.setup.ml
-*.dune.inc
-
-# Glyph bytecode output
+*.a
 *.gbc
-
-# Editor / OS
-*.swp
-*.swo
-*~
-.DS_Store
-.idea/
-.vscode/
-*.iml
-
-# Test / coverage leftovers
-_coverage/
-bisect*.out
-*.coverage
-
-# Local env
-.env
-.env.*

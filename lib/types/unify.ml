@@ -1,151 +1,168 @@
-(** Unification with occurs-check and Rémy-style level updates. *)
+(** Unification for Glyph's Hindley–Milner types (matches [Ty]). *)
 
-let rec unify_var span tv_ref t =
-  let t = Ty.repr t in
-  match t with
-  | Ty.TVar other when other == tv_ref -> ()
-  | Ty.TVar { contents = Ty.Unbound tv' } as t' -> (
-      match !tv_ref with
-      | Ty.Unbound tv ->
-          if tv.id = tv'.id then ()
-          else if Ty.occurs tv t' then Error.occurs_error span ~tv ~ty:t'
-          else (
-            let lvl = if tv.level < tv'.level then tv.level else tv'.level in
-            tv.level <- lvl;
-            tv'.level <- lvl;
-            tv_ref := Ty.Link t')
-      | Ty.Link t2 -> unify ~span (Ty.repr t2) t'
-      | Ty.Generic _ ->
-          Error.raise_error ~kind:Error.Other ~actual:t' span
-            "Cannot unify a quantified type variable")
-  | t' -> (
-      match !tv_ref with
-      | Ty.Unbound tv ->
-          if Ty.occurs tv t' then Error.occurs_error span ~tv ~ty:t'
-          else (
-            Ty.update_level tv.level t';
-            tv_ref := Ty.Link t')
-      | Ty.Link t2 -> unify ~span (Ty.repr t2) t'
-      | Ty.Generic tv ->
-          Error.raise_error ~kind:Error.Other ~actual:t' span
-            (Printf.sprintf "Cannot unify quantified type variable '%s"
-               (match tv.namehint with Some n -> n | None -> string_of_int tv.id)))
+open Ty
 
-and unify ~span a b =
-  let a = Ty.repr a in
-  let b = Ty.repr b in
+type error = string * Span.t option
+
+let err msg = Error (msg, None)
+let err_span span msg = Error (msg, Some span)
+
+let mismatch expected actual =
+  Printf.sprintf "type mismatch: expected %s but got %s" (to_string expected)
+    (to_string actual)
+
+let rec unify (a : ty) (b : ty) : (unit, error) result =
+  let a = repr a in
+  let b = repr b in
   match (a, b) with
-  | Ty.TVar r1, Ty.TVar r2 when r1 == r2 -> ()
-  | Ty.TVar r, t | t, Ty.TVar r -> unify_var span r t
-  | Ty.TUnit, Ty.TUnit | Ty.TInt, Ty.TInt | Ty.TFloat, Ty.TFloat | Ty.TBool, Ty.TBool
-  | Ty.TString, Ty.TString | Ty.TChar, Ty.TChar -> ()
-  | Ty.TCon n1, Ty.TCon n2 when String.equal n1 n2 -> ()
-  | Ty.TApp (f1, a1), Ty.TApp (f2, a2) -> unify ~span f1 f2; unify ~span a1 a2
-  | Ty.TArrow (a1, b1), Ty.TArrow (a2, b2) -> unify ~span a1 a2; unify ~span b1 b2
-  | Ty.TTuple xs, Ty.TTuple ys ->
-      if List.length xs <> List.length ys then Error.mismatch span ~expected:a ~actual:b
-      else List.iter2 (fun x y -> unify ~span x y) xs ys
-  | Ty.TArray a1, Ty.TArray a2 | Ty.TRef a1, Ty.TRef a2 -> unify ~span a1 a2
-  | Ty.TRecord fs, Ty.TRecord gs -> unify_records ~span ~expected:a ~actual:b fs gs
-  | Ty.TUnit, Ty.TTuple [] | Ty.TTuple [], Ty.TUnit -> ()
-  | Ty.TUnit, Ty.TCon "Unit" | Ty.TCon "Unit", Ty.TUnit -> ()
-  | Ty.TInt, Ty.TCon "Int" | Ty.TCon "Int", Ty.TInt -> ()
-  | Ty.TFloat, Ty.TCon "Float" | Ty.TCon "Float", Ty.TFloat -> ()
-  | Ty.TBool, Ty.TCon "Bool" | Ty.TCon "Bool", Ty.TBool -> ()
-  | Ty.TString, Ty.TCon "String" | Ty.TCon "String", Ty.TString -> ()
-  | Ty.TChar, Ty.TCon "Char" | Ty.TCon "Char", Ty.TChar -> ()
-  | _ -> Error.mismatch span ~expected:a ~actual:b
+  | TVar r1, TVar r2 when r1 == r2 -> Ok ()
+  | ( TVar ({ contents = Unbound tv1 } as r1),
+      TVar ({ contents = Unbound tv2 } as r2) ) ->
+      let lvl = min tv1.level tv2.level in
+      tv1.level <- lvl;
+      tv2.level <- lvl;
+      if tv1.id < tv2.id then (
+        r2 := Link a;
+        Ok ())
+      else (
+        r1 := Link b;
+        Ok ())
+  | TVar ({ contents = Unbound tv } as r), t | t, TVar ({ contents = Unbound tv } as r)
+    ->
+      if occurs tv t then
+        err
+          (Printf.sprintf "occurs check failed: variable occurs in %s"
+             (to_string t))
+      else (
+        update_level tv.level t;
+        r := Link t;
+        Ok ())
+  | TVar { contents = Generic _ }, _ | _, TVar { contents = Generic _ } ->
+      err "internal: unification involving generic variable"
+  | TVar { contents = Link _ }, _ | _, TVar { contents = Link _ } ->
+      unify (repr a) (repr b)
+  | TUnit, TUnit
+  | TInt, TInt
+  | TFloat, TFloat
+  | TBool, TBool
+  | TString, TString
+  | TChar, TChar ->
+      Ok ()
+  | TCon n1, TCon n2 when String.equal n1 n2 -> Ok ()
+  | TApp (f1, a1), TApp (f2, a2) -> (
+      match unify f1 f2 with Error _ as e -> e | Ok () -> unify a1 a2)
+  | TArrow (a1, b1), TArrow (a2, b2) -> (
+      match unify a1 a2 with Error _ as e -> e | Ok () -> unify b1 b2)
+  | TTuple xs, TTuple ys ->
+      if List.length xs <> List.length ys then
+        err
+          (Printf.sprintf "tuple arity mismatch: %d vs %d" (List.length xs)
+             (List.length ys))
+      else unify_list xs ys
+  | TArray a, TArray b | TRef a, TRef b -> unify a b
+  | TRecord f1, TRecord f2 -> unify_records f1 f2
+  | _ -> err (mismatch a b)
 
-and unify_records ~span ~expected ~actual fs gs =
-  let sorted = List.sort (fun (n1, _, _) (n2, _, _) -> String.compare n1 n2) in
-  let fs = sorted fs and gs = sorted gs in
-  if List.length fs <> List.length gs then Error.mismatch span ~expected ~actual
-  else
-    List.iter2
-      (fun (n1, t1, m1) (n2, t2, m2) ->
-        if n1 <> n2 || m1 <> m2 then Error.mismatch span ~expected ~actual
-        else unify ~span t1 t2)
-      fs gs
+and unify_list xs ys =
+  match (xs, ys) with
+  | [], [] -> Ok ()
+  | x :: xs, y :: ys -> (
+      match unify x y with Error _ as e -> e | Ok () -> unify_list xs ys)
+  | _ -> err "internal: list length mismatch in unify_list"
 
-let try_unify ~span a b =
-  try unify ~span a b; Ok () with Error.Type_error e -> Error e
+and unify_records f1 f2 =
+  let sort fs =
+    List.sort (fun (a, _, _) (b, _, _) -> String.compare a b) fs
+  in
+  let f1 = sort f1 in
+  let f2 = sort f2 in
+  let rec go a b =
+    match (a, b) with
+    | [], [] -> Ok ()
+    | (n1, t1, m1) :: xs, (n2, t2, m2) :: ys ->
+        if n1 <> n2 then
+          err (Printf.sprintf "record field mismatch: %s vs %s" n1 n2)
+        else if m1 <> m2 then
+          err (Printf.sprintf "record field mutability mismatch: %s" n1)
+        else (
+          match unify t1 t2 with Error _ as e -> e | Ok () -> go xs ys)
+    | (n, _, _) :: _, [] -> err (Printf.sprintf "missing record field %s" n)
+    | [], (n, _, _) :: _ -> err (Printf.sprintf "unexpected record field %s" n)
+  in
+  go f1 f2
 
-let unify_list ~span pairs = List.iter (fun (a, b) -> unify ~span a b) pairs
+let unify_span ~span a b =
+  match unify a b with
+  | Ok () -> Ok ()
+  | Error (msg, _) -> Error (msg, Some span)
 
-let as_function ~span ty =
-  match Ty.repr ty with
-  | Ty.TArrow (a, b) -> (a, b)
-  | Ty.TVar ({ contents = Ty.Unbound _ } as r) ->
-      let a = Ty.fresh_var () in
-      let b = Ty.fresh_var () in
-      r := Ty.Link (Ty.TArrow (a, b));
-      (a, b)
-  | _ -> Error.not_a_function span ty
+let require_arrow t =
+  match repr t with
+  | TArrow (a, b) -> Ok (a, b)
+  | TVar ({ contents = Unbound _ } as r) ->
+      let a = fresh_var () in
+      let b = fresh_var () in
+      r := Link (TArrow (a, b));
+      Ok (a, b)
+  | _ -> err (Printf.sprintf "expected a function type, got %s" (to_string t))
+
+let require_tuple ~arity t =
+  match repr t with
+  | TTuple ts when List.length ts = arity -> Ok ts
+  | TVar ({ contents = Unbound _ } as r) ->
+      let ts = List.init arity (fun _ -> fresh_var ()) in
+      r := Link (TTuple ts);
+      Ok ts
+  | _ ->
+      err
+        (Printf.sprintf "expected a tuple of arity %d, got %s" arity
+           (to_string t))
+
+let try_unify ~span a b : (unit, Error.t) result =
+  match unify_span ~span a b with
+  | Ok () -> Ok ()
+  | Error (msg, sp) ->
+      let span = Option.value sp ~default:span in
+      Error
+        (Error.make ~kind:Error.Unify_mismatch ~expected:a
+           ~actual:b span msg)
 
 let apply ~span ~fun_ty ~arg_ty =
-  let a, b = as_function ~span fun_ty in
-  unify ~span a arg_ty;
-  b
+  match require_arrow fun_ty with
+  | Error (msg, _) ->
+      raise
+        (Error.Type_error (Error.make ~kind:Error.Not_a_function span msg))
+  | Ok (domain, codomain) -> (
+      match unify_span ~span domain arg_ty with
+      | Ok () -> codomain
+      | Error (msg, _) ->
+          raise
+            (Error.Type_error
+               (Error.make ~kind:Error.Unify_mismatch ~expected:domain
+                  ~actual:arg_ty span msg)))
 
 let apply_many ~span ~fun_ty ~arg_tys =
-  List.fold_left (fun fty arg -> apply ~span ~fun_ty:fty ~arg_ty:arg) fun_ty arg_tys
+  List.fold_left
+    (fun fty arg -> apply ~span ~fun_ty:fty ~arg_ty:arg)
+    fun_ty arg_tys
 
-let as_tuple ~span ~arity ty =
-  match Ty.repr ty with
-  | Ty.TTuple ts when List.length ts = arity -> ts
-  | Ty.TVar ({ contents = Ty.Unbound _ } as r) ->
-      let ts = List.init arity (fun _ -> Ty.fresh_var ()) in
-      r := Ty.Link (Ty.TTuple ts);
-      ts
-  | Ty.TUnit when arity = 0 -> []
-  | other ->
-      Error.raise_error ~kind:Error.Arity_mismatch ~actual:other span
-        (Printf.sprintf "Expected a tuple of arity %d, got %s" arity (Ty.to_string other))
-
-let project_field ~span ty name =
-  let name_s = Ident.name name in
-  match Ty.repr ty with
-  | Ty.TRecord fields -> (
-      match List.find_opt (fun (n, _, _) -> String.equal n name_s) fields with
-      | Some (_, fty, _) -> fty
-      | None -> Error.unbound_field span name)
-  | Ty.TVar ({ contents = Ty.Unbound _ } as r) ->
-      let fty = Ty.fresh_var () in
-      r := Ty.Link (Ty.TRecord [ (name_s, fty, false) ]);
-      fty
-  | other ->
-      Error.raise_error ~kind:Error.Not_a_record ~actual:other span
-        (Printf.sprintf "Cannot project field %s from %s" name_s (Ty.to_string other))
-
-let with_level f =
-  Ty.enter_level ();
-  match f () with
-  | exception exn -> Ty.leave_level (); raise exn
-  | v -> Ty.leave_level (); v
-
-let can_unify a b =
-  let saved = ref [] in
-  let seen = Hashtbl.create 16 in
-  let remember r tv =
-    if not (Hashtbl.mem seen tv.Ty.id) then (
-      Hashtbl.add seen tv.id ();
-      saved := (r, !r, tv.level) :: !saved)
-  in
-  let rec collect t =
-    match Ty.repr t with
-    | Ty.TVar ({ contents = Ty.Unbound tv } as r)
-    | Ty.TVar ({ contents = Ty.Generic tv } as r) -> remember r tv
-    | Ty.TApp (a, b) | Ty.TArrow (a, b) -> collect a; collect b
-    | Ty.TTuple ts -> List.iter collect ts
-    | Ty.TArray t | Ty.TRef t -> collect t
-    | Ty.TRecord fs -> List.iter (fun (_, ty, _) -> collect ty) fs
-    | _ -> ()
-  in
-  collect a; collect b;
-  let ok = match try_unify ~span:Span.dummy a b with Ok () -> true | Error _ -> false in
-  List.iter
-    (fun (r, state, level) ->
-      r := state;
-      match state with Ty.Unbound tv | Ty.Generic tv -> tv.level <- level | Ty.Link _ -> ())
-    !saved;
-  ok
+let project_field ~span record_ty name =
+  let fname = Ident.name name in
+  match repr record_ty with
+  | TRecord fields -> (
+      match List.find_opt (fun (n, _, _) -> String.equal n fname) fields with
+      | Some (_, ty, _) -> ty
+      | None ->
+          raise
+            (Error.Type_error
+               (Error.make ~kind:Error.Unbound_field span
+                  (Printf.sprintf "unbound record field %s" fname))))
+  | TVar ({ contents = Unbound _ } as r) ->
+      let field_ty = fresh_var () in
+      r := Link (TRecord [ (fname, field_ty, false) ]);
+      field_ty
+  | _ ->
+      raise
+        (Error.Type_error
+           (Error.make ~kind:Error.Not_a_record span
+              (Printf.sprintf "expected a record, got %s" (to_string record_ty))))
