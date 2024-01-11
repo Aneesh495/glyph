@@ -1,5 +1,5 @@
 (executable
- (name glyph_cli)
+ (name glyph)
  (public_name glyph)
- (libraries glyph_types glyph_syntax glyph_util cmdliner)
- (flags (:standard -w -32-33-34-37-39-27-26-70-50-9-6-67)))
+ (libraries glyph cmdliner)
+ (modules glyph))
