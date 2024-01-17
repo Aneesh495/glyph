@@ -3,4 +3,4 @@
  (public_name glyph.util)
  (wrapped false)
  (libraries unix)
- (flags (:standard -w -32-33-27-26-70-50-9-6-67-69)))
+ (flags (:standard -w -32-33-34-37-39-27-26-70-50-9-6-67-8)))
