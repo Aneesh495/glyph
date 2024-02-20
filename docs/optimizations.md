@@ -13,7 +13,7 @@ O1: simplify → copy_prop → const_prop → dce
 O2: O1 + sccp → cse → inline → simplify → copy_prop → const_prop → dce
 ```
 
-Iterating simplify/copy/const/dce a couple of times is fine — each pass is
+Iterating simplify/copy/const/dce a couple of times is fine, each pass is
 idempotent enough that a fixed iteration count works.
 
 ```mermaid
@@ -130,7 +130,7 @@ Only **pure** ops fold. Calls, allocations, and prints stay.
 
 ---
 
-## SCCP — sparse conditional constant propagation
+## SCCP, sparse conditional constant propagation
 
 **Goal:** Simultaneously discover constants **and** unreachable CFG edges
 (Wegman–Zadeck). More powerful than separate const-prop + unreachable-block
@@ -249,7 +249,7 @@ catches more cases; a block-local table is the minimum viable CSE.
 
 **Congruence conditions:** same opcode, equivalent operands, pure, no
 intervening side effect that could matter (for Glyph’s MIR, allocations are
-not CSE’d — identity matters).
+not CSE’d, identity matters).
 
 ---
 
@@ -260,7 +260,7 @@ not CSE’d — identity matters).
 Heuristics (typical):
 
 - Callee instruction count ≤ threshold (e.g. 20–40 insts)
-- Not recursive (or only leaf self-recursion unrolled carefully — start by
+- Not recursive (or only leaf self-recursion unrolled carefully, start by
   refusing recursive callees)
 - Single-call-site bonus
 - Don’t inline functions that allocate huge literals / have many calls
@@ -334,11 +334,11 @@ dune exec glyph -- dump-mir examples/fib.gl
 dune exec glyph -- dump-mir --opt O2 examples/fib.gl
 ```
 
-Diff the MIR before/after a single pass when developing — the pass manager
+Diff the MIR before/after a single pass when developing, the pass manager
 should allow `--pass=sccp` style isolation.
 
 ## Related
 
-- [ir.md](ir.md) — SSA / φ refresher
-- [architecture.md](architecture.md) — where opts sit in the pipeline
-- [contributing.md](contributing.md) — how to add a new pass
+- [ir.md](ir.md), SSA / φ refresher
+- [architecture.md](architecture.md), where opts sit in the pipeline
+- [contributing.md](contributing.md), how to add a new pass

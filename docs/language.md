@@ -212,7 +212,7 @@ Nullary constructors need no parentheses: `Nil`, `None`.
 
 Types of `let`-bound names are generalized (Hindley–Milner). Function
 parameters and lambda-bound variables stay monomorphic within a single
-instantiation — classic HM, not System F with first-class polymorphism.
+instantiation, classic HM, not System F with first-class polymorphism.
 
 ```glyph
 let id x = x
@@ -387,5 +387,5 @@ let main = print_int (ack 3 3)
 - Mutable references in the core language
 - Exceptions (use `Option` / `Either`)
 
-The compiler pipeline is built so these can grow without rewriting the VM —
+The compiler pipeline is built so these can grow without rewriting the VM,
 HIR and MIR already have room for new expression forms.

@@ -1,6 +1,6 @@
 # Contributing
 
-Glyph is a passion compiler project — patches that deepen a real pass (better
+Glyph is a passion compiler project, patches that deepen a real pass (better
 diagnostics, a tighter GC, a new opt) are more welcome than drive-by renames.
 This page is how to build, test, and add something without fighting the
 pipeline.
@@ -77,7 +77,7 @@ Don’t create reverse dependencies (e.g. `mir` must not import `codegen`).
 1. **Create** `lib/opt/my_pass.ml` (+ `.mli`) that takes SSA MIR and returns SSA
    MIR. Keep it pure w.r.t. global compiler state.
 2. **Register** the pass in `pipeline.ml` (e.g. in the `O2` list after whatever
-   it depends on — CSE likes to follow SCCP; DCE likes to be last).
+   it depends on, CSE likes to follow SCCP; DCE likes to be last).
 3. **Document** a before/after snippet in [optimizations.md](optimizations.md).
 4. **Test** with a MIR fixture or a tiny `.gl` file whose dump changes in the
    expected way:
@@ -103,7 +103,7 @@ let run (f : Mir.func) : Mir.func =
   f
 ```
 
-Wire it next to `const_prop` / `dce` in the pass manager — don’t invent a
+Wire it next to `const_prop` / `dce` in the pass manager, don’t invent a
 second pipeline.
 
 ## Adding a bytecode opcode
@@ -140,4 +140,4 @@ If you change a pass’s contract, update the matching doc in the same PR.
 
 ## License
 
-MIT — see `LICENSE` when present.
+MIT, see `LICENSE` when present.

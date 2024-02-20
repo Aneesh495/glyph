@@ -2,7 +2,7 @@
 
 Glyph is a multi-pass compiler that turns a strict functional language into
 register-based bytecode and runs it on a small VM with a copying GC. Every
-stage is a real IR transformation you can dump and step through — no black-box
+stage is a real IR transformation you can dump and step through, no black-box
 “backend.”
 
 This document walks the pipeline end-to-end: what each package owns, what
@@ -103,7 +103,7 @@ Source text → stream of `(token * Span.t)`.
 - Identifiers are interned via `glyph_util.Ident` / `Intern` so later stages
   compare stamps, not strings.
 
-**Out:** token stream. **Errors:** unexpected char, unclosed string/comment —
+**Out:** token stream. **Errors:** unexpected char, unclosed string/comment,
 emitted through `Diagnostic.Bag`.
 
 ### 2. Parsing (`glyph_syntax.Parser`)
@@ -153,7 +153,7 @@ already “compiler-shaped”:
 - constructors/tuples explicit
 - every node carries a type
 
-Pattern matching is *not* left as `match` forever — the pattern compiler
+Pattern matching is *not* left as `match` forever, the pattern compiler
 turns clauses into decision trees / nested switches (Maranget-style
 constructor specialization). That is the heaviest HIR pass; it must produce
 exhaustive trees and bind scrutinee projections once.
@@ -244,7 +244,7 @@ sugar for a language this size. Pratt keeps expression precedence readable
 without Menhir’s grammar file (we can add Menhir later if the surface grows).
 
 **Why HM before HIR?** Source-shaped errors. Also, polymorphic lets need
-generalization at binder sites that still look like `let` — after ANF and
+generalization at binder sites that still look like `let`, after ANF and
 pattern compilation the binder structure is messier.
 
 **Why HIR then MIR?** Pattern decision trees and desugaring want a tree.
@@ -264,7 +264,7 @@ matching for compilers, and a culture that already thinks in Hindley–Milner.
 
 - Every syntax node carries a `Span.t` so diagnostics can point at source.
 - Type inference never fabricates spans; it reuses AST spans.
-- SSA form is maintained or deliberately destroyed inside a pass — never
+- SSA form is maintained or deliberately destroyed inside a pass, never
   left half-broken for the next one.
 - The GC must treat forwarding pointers as the single source of truth while
   a collection is in flight.
@@ -291,9 +291,9 @@ compile file =
 
 ## Related docs
 
-- [language.md](language.md) — surface language
-- [type-system.md](type-system.md) — inference details
-- [ir.md](ir.md) — HIR/MIR/SSA
-- [vm.md](vm.md) — ISA and GC
-- [optimizations.md](optimizations.md) — each opt pass
-- [contributing.md](contributing.md) — build, test, add a pass
+- [language.md](language.md), surface language
+- [type-system.md](type-system.md), inference details
+- [ir.md](ir.md), HIR/MIR/SSA
+- [vm.md](vm.md), ISA and GC
+- [optimizations.md](optimizations.md), each opt pass
+- [contributing.md](contributing.md), build, test, add a pass

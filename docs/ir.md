@@ -2,9 +2,9 @@
 
 Glyph uses two IRs after typing:
 
-1. **HIR** — tree-shaped, typed, close to a desugared surface language;
+1. **HIR**, tree-shaped, typed, close to a desugared surface language;
    pattern matches become decision trees.
-2. **MIR** — control-flow graph of basic blocks; then **SSA** form for
+2. **MIR**, control-flow graph of basic blocks; then **SSA** form for
    optimization and codegen.
 
 This note covers shapes, SSA construction (Cytron-style φ placement + rename),
@@ -73,7 +73,7 @@ switch scrutinee.tag
       …
 ```
 
-Algorithm family: **Maranget** / constructor specialization — pick a column,
+Algorithm family: **Maranget** / constructor specialization, pick a column,
 case-split on outermost constructors, specialize the matrix, recurse. Goals:
 
 - Exhaustiveness (or explicit default / error case)
@@ -144,7 +144,7 @@ flowchart TD
 Block **A dominates B** if every path from entry to B goes through A.  
 **Immediate dominator** `idom(B)` is the closest strict dominator.
 
-**Dominance frontier** `DF(B)`: blocks where `B`’s dominance “stops” —
+**Dominance frontier** `DF(B)`: blocks where `B`’s dominance “stops”,
 join points that need φ for variables assigned in `B`.
 
 ```text
@@ -164,12 +164,12 @@ flowchart TB
   end
 ```
 
-For a diamond CFG, `DF(then)` and `DF(else)` both contain `join` — so
+For a diamond CFG, `DF(then)` and `DF(else)` both contain `join`, so
 assignments in either arm get a φ at `join`.
 
 ## SSA construction (Cytron et al.)
 
-### Phase 1 — Insert φ
+### Phase 1, Insert φ
 
 For each variable `x` that is assigned in several blocks:
 
@@ -185,7 +185,7 @@ while W nonempty:
       if C not already a def site: push C onto W
 ```
 
-### Phase 2 — Rename
+### Phase 2, Rename
 
 DFS over the dominator tree with a per-variable stack of current names:
 
@@ -309,7 +309,7 @@ Runtime: heap object with function id + captured values. See [vm.md](vm.md).
    destination slot **before** the jump.
 4. Emit ops (`ADD`, `CALL`, `ALLOC_ADT`, …) and patch jump offsets.
 
-φ nodes never appear in the bytecode ISA — they’re compile-time fiction that
+φ nodes never appear in the bytecode ISA, they’re compile-time fiction that
 make opts nice.
 
 ## Module map
@@ -327,6 +327,6 @@ make opts nice.
 
 ## Related
 
-- [optimizations.md](optimizations.md) — passes on SSA MIR
-- [vm.md](vm.md) — what emit targets
-- [diagrams/pipeline.md](diagrams/pipeline.md) — overview diagrams
+- [optimizations.md](optimizations.md), passes on SSA MIR
+- [vm.md](vm.md), what emit targets
+- [diagrams/pipeline.md](diagrams/pipeline.md), overview diagrams

@@ -3,8 +3,8 @@
 A strict functional programming language and toolchain written end-to-end in OCaml.
 
 Glyph started as a deep dive into language implementation: a lexer you can step
-through, Hindley–Milner inference that actually generalizes, and — under
-`research/` — SSA construction, classical opts, a bytecode ISA, and a
+through, Hindley–Milner inference that actually generalizes, and, under
+`research/`, SSA construction, classical opts, a bytecode ISA, and a
 semi-space copying GC.
 
 ```
