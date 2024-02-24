@@ -1,11 +1,10 @@
 # Glyph
 
-A strict functional programming language and toolchain written end-to-end in OCaml.
+A strict functional language frontend and compiler research project in OCaml.
 
-Glyph started as a deep dive into language implementation: a lexer you can step
-through, Hindley–Milner inference that actually generalizes, and, under
-`research/`, SSA construction, classical opts, a bytecode ISA, and a
-semi-space copying GC.
+The working CLI parses and typechecks Glyph programs with Hindley–Milner
+inference. `research/` contains HIR, SSA, optimization, bytecode, and VM/GC
+modules that are still being integrated into the runtime pipeline.
 
 ```
 source ──▶ lex ──▶ parse ──▶ HM infer ──▶ (research: HIR → SSA MIR → opts → VM)
@@ -22,8 +21,9 @@ opam install dune cmdliner -y
 dune build
 dune exec glyph -- typecheck examples/fib.gl
 dune exec glyph -- parse examples/fib.gl
-dune exec glyph -- run examples/fib.gl
 ```
+
+`glyph run` currently typechecks the input; it does not execute it yet.
 
 ## Language tour
 

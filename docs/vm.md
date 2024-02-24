@@ -1,9 +1,10 @@
 # Virtual machine and bytecode
 
-The Glyph VM is a **register-based** bytecode interpreter with a **semi-space
-copying garbage collector** (Cheney’s algorithm). Codegen emits a self-contained
-**chunk**: code bytes, a constant pool, and function metadata. This document
-is the ISA and runtime design note for `glyph_codegen` + `glyph_vm`.
+This is the ISA and runtime design note for the VM and codegen modules under
+`research/`. They are not yet wired to the CLI. The intended VM is a
+**register-based** bytecode interpreter with a **semi-space copying garbage
+collector** (Cheney’s algorithm). A chunk would contain code bytes, a constant
+pool, and function metadata.
 
 ## Chunk layout
 
@@ -15,8 +16,8 @@ Chunk
 └── entry : main function index / pc
 ```
 
-On disk (`.gbc`), the driver serializes the same pieces for `glyph disasm` /
-`glyph run` without recompiling.
+The proposed `.gbc` format would serialize these pieces. The current CLI does
+not produce `.gbc` files or run bytecode.
 
 ## Frame layout
 

@@ -1,8 +1,9 @@
 # Optimization passes
 
-All passes run on **SSA MIR** (`glyph_opt`). The pass manager (`pass.ml` /
-`pipeline.ml`) sequences them for `O0` (none), `O1` (cheap), and `O2`
-(aggressive). Each pass preserves (or restores) SSA form and CFG validity.
+The optimization modules under `research/opt` target **SSA MIR**. The intended
+pass manager (`pass_manager.ml` / `opt_pipeline.ml`) sequences them for `O0`
+(none), `O1` (cheap), and `O2` (aggressive). These passes are not wired into the
+working CLI yet.
 
 Companion IR shapes: [ir.md](ir.md).
 

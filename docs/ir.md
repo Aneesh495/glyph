@@ -1,6 +1,7 @@
 # Intermediate representations
 
-Glyph uses two IRs after typing:
+The research pipeline defines two IRs after typing. These modules are not yet
+integrated into the working CLI:
 
 1. **HIR**, tree-shaped, typed, close to a desugared surface language;
    pattern matches become decision trees.
