@@ -1,0 +1,5 @@
+(library
+ (name glyph_opt)
+ (public_name glyph.opt)
+ (wrapped false)
+ (libraries glyph_util glyph_mir))

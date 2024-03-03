@@ -83,18 +83,38 @@ let current_binop p =
   | Token.Equal -> Some Token.Op_eq
   | _ -> None
 
+let is_ty_atom tok =
+  match tok.Token.kind with
+  | Token.Ident _ | Token.Ctor _ | Token.LParen | Token.Underscore -> true
+  | _ -> false
+
 let rec parse_ty p =
-  let left = parse_ty_atom p in
+  let left = parse_ty_app p in
   if consume_kind p Token.Arrow then
     let right = parse_ty p in
     Ast.ty (Ast.Ty_arrow (left, right))
       (Span.merge left.Ast.ty_span right.Ast.ty_span)
   else left
 
+and parse_ty_app p =
+  let base = parse_ty_atom p in
+  match base.Ast.ty_desc with
+  | Ast.Ty_named (id, []) ->
+      let args = ref [] in
+      while is_ty_atom (current p) do
+        args := parse_ty_atom p :: !args
+      done;
+      if !args = [] then base
+      else
+        let rev_args = List.rev !args in
+        let end_span = (List.hd !args).Ast.ty_span in
+        Ast.ty (Ast.Ty_named (id, rev_args)) (Span.merge base.Ast.ty_span end_span)
+  | _ -> base
+
 and parse_ty_atom p =
   let tok = current p in
   match tok.Token.kind with
-  | Token.Ident name when String.length name > 0 && name.[0] = '\'' ->
+  | Token.Ident name when String.length name > 0 && (name.[0] = '\'' || (name.[0] >= 'a' && name.[0] <= 'z')) ->
       ignore (advance p);
       Ast.ty (Ast.Ty_var (Ident.Intern.intern name)) tok.Token.span
   | Token.Ident name | Token.Ctor name ->
@@ -126,7 +146,10 @@ and parse_ty_atom p =
         else (
           ignore (expect_kind p Token.RParen);
           t0)
-  | _ -> fail tok.Token.span "expected type"
+  | Token.Underscore ->
+      ignore (advance p);
+      Ast.ty Ast.Ty_hole tok.Token.span
+  | _ -> fail tok.Token.span (Printf.sprintf "expected type, found %s" (Token.kind_to_string tok.Token.kind))
 
 let is_pat_atom tok =
   match tok.Token.kind with
@@ -171,20 +194,37 @@ and parse_pattern_atom p =
   | Token.Ctor name ->
       ignore (advance p);
       let id = Ident.Intern.intern name in
-      let args =
-        if check_kind p Token.LParen then (
-          ignore (advance p);
-          let xs = ref [] in
-          if not (check_kind p Token.RParen) then (
-            xs := parse_pattern p :: !xs;
+      let args = ref [] in
+      if check_kind p Token.LParen then (
+        ignore (advance p);
+        if not (check_kind p Token.RParen) then (
+          let first = parse_pattern p in
+          if consume_kind p Token.Comma then (
+            args := first :: !args;
+            args := parse_pattern p :: !args;
             while consume_kind p Token.Comma do
-              xs := parse_pattern p :: !xs
-            done);
+              args := parse_pattern p :: !args
+            done;
+            ignore (expect_kind p Token.RParen);
+            args := List.rev !args
+          ) else (
+            ignore (expect_kind p Token.RParen);
+            args := [ first ]
+          )
+        ) else (
           ignore (expect_kind p Token.RParen);
-          List.rev !xs)
-        else []
+          args := [ Ast.pat (Ast.Pat_lit Ast.Lit_unit) tok.Token.span ]
+        )
+      );
+      while is_pat_atom (current p) do
+        args := !args @ [ parse_pattern_atom p ]
+      done;
+      let end_span =
+        match !args with
+        | [] -> tok.Token.span
+        | xs -> (List.hd (List.rev xs)).Ast.pat_span
       in
-      Ast.pat (Ast.Pat_ctor (id, args)) tok.Token.span
+      Ast.pat (Ast.Pat_ctor (id, !args)) (Span.merge tok.Token.span end_span)
   | Token.Int n ->
       ignore (advance p);
       Ast.pat (Ast.Pat_lit (Ast.Lit_int n)) tok.Token.span
@@ -480,15 +520,11 @@ let parse_type_def p =
     | _ -> fail name_tok.Token.span "expected type name"
   in
   let params = ref [] in
-  while
-    match (current p).Token.kind with
-    | Token.Ident n when String.length n > 0 && n.[0] = '\'' -> true
-    | _ -> false
-  do
+  while (current p).Token.kind <> Token.Equal && not (at_end p) do
     let tok = advance p in
     match tok.Token.kind with
     | Token.Ident n -> params := Ident.Intern.intern n :: !params
-    | _ -> ()
+    | _ -> fail tok.Token.span "expected type parameter name"
   done;
   ignore (expect_kind p Token.Equal);
   ignore (consume_kind p Token.Pipe);
@@ -509,6 +545,15 @@ let parse_type_def p =
             ignore (advance p);
             args := parse_ty p :: !args
         | _ -> cont := false
+      done)
+    else (
+      while
+        match (current p).Token.kind with
+        | Token.Pipe | Token.Semicolon | Token.Keyword _ -> false
+        | _ when at_end p -> false
+        | _ -> is_ty_atom (current p)
+      do
+        args := parse_ty_atom p :: !args
       done);
     {
       Ast.ctor_name = cname;

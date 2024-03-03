@@ -1,6 +1,7 @@
-(executable
- (name glyph_cli)
- (public_name glyph)
+(library
+ (name glyph_driver)
+ (public_name glyph.driver)
+ (wrapped false)
  (libraries
   glyph_util
   glyph_syntax
@@ -9,6 +10,4 @@
   glyph_mir
   glyph_opt
   glyph_bytecode
-  glyph_vm
-  glyph_driver
-  cmdliner))
+  glyph_vm))

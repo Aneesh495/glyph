@@ -1,0 +1,5 @@
+(library
+ (name glyph_bytecode)
+ (public_name glyph.bytecode)
+ (wrapped false)
+ (libraries glyph_util glyph_mir))

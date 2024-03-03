@@ -1,0 +1,5 @@
+(library
+ (name glyph_mir)
+ (public_name glyph.mir)
+ (wrapped false)
+ (libraries glyph_util glyph_syntax glyph_types glyph_hir))

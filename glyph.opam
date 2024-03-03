@@ -7,7 +7,7 @@ description: """
 Glyph is a strict functional programming language implemented entirely in OCaml.
 It includes a hand-written lexer and parser, Hindley-Milner type inference,
 pattern compilation, SSA mid-level IR, classical optimizations, a bytecode ISA,
-and a semi-space copying GC — see research/ for the deeper middle and back end."""
+and a semi-space copying GC."""
 maintainer: ["Aneesh Krishna"]
 authors: ["Aneesh Krishna"]
 license: "MIT"
@@ -15,8 +15,10 @@ homepage: "https://github.com/Aneesh495/glyph"
 bug-reports: "https://github.com/Aneesh495/glyph/issues"
 depends: [
   "ocaml" {>= "5.2"}
-  "dune" {>= "3.14"}
+  "dune" {>= "3.14" & >= "3.14"}
   "cmdliner"
+  "alcotest" {with-test}
+  "qcheck" {with-test}
   "odoc" {with-doc}
 ]
 build: [

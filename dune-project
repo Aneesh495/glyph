@@ -14,5 +14,10 @@
 Glyph is a strict functional programming language implemented entirely in OCaml.
 It includes a hand-written lexer and parser, Hindley-Milner type inference,
 pattern compilation, SSA mid-level IR, classical optimizations, a bytecode ISA,
-and a semi-space copying GC — see research/ for the deeper middle and back end.")
- (depends (ocaml (>= 5.2)) dune cmdliner))
+and a semi-space copying GC.")
+ (depends
+  (ocaml (>= 5.2))
+  (dune (>= 3.14))
+  cmdliner
+  (alcotest :with-test)
+  (qcheck :with-test)))
