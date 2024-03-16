@@ -54,19 +54,6 @@ let scan_cell heap (cell : Heap.cell) =
 let collect heap roots =
   incr collections;
   let old_top = heap.Heap.top in
-  (* 1. Prepare tospace as empty destination. flip_spaces swaps the arrays
-     and zeroes the bump pointer. After flip, the OLD fromspace is in
-     [tospace] slot name-wise — we need care.
-
-     Our Heap representation:
-       - Allocation always bumps [fromspace] via [top].
-       - [tospace_alloc] writes into [tospace] and bumps [top].
-
-     Algorithm:
-       a. Remember old fromspace array.
-       b. Reset top=0; evacuate into tospace via tospace_alloc.
-       c. Scan tospace[0 .. top).
-       d. Swap: fromspace <- tospace contents; clear old. *)
   let old_from = heap.fromspace in
   let old_cap = heap.capacity in
   (* Ensure tospace is fresh and large enough. *)
@@ -74,7 +61,10 @@ let collect heap roots =
   heap.top <- 0;
 
   let rewrite_array arr =
-    Array.map (fun v -> forward_value heap v) arr
+    for i = 0 to Array.length arr - 1 do
+      arr.(i) <- forward_value heap arr.(i)
+    done;
+    arr
   in
 
   (* 2. Evacuate roots. copy_object reads cells from [fromspace], which

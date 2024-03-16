@@ -30,6 +30,7 @@ type t = {
 
 val create : ?capacity:int -> unit -> t
 val set_collect_fn : t -> (t -> unit) -> unit
+val maybe_collect : t -> unit
 
 val alloc : t -> obj_kind -> Value.t
 val alloc_string : t -> string -> Value.t

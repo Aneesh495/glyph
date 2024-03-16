@@ -117,7 +117,8 @@ let call_closure vm ~dst ~clo ~args =
         | Some fr -> fr
         | None -> failwith "call_closure: no frame"
       in
-      set_reg f dst (fn args)
+      let args' = List.map (resolve_heap vm) args in
+      set_reg f dst (fn args')
   | v -> failwith ("call_closure: not a closure: " ^ Value.to_string v)
 
 let return_to_caller vm ret_val =
@@ -297,17 +298,20 @@ let step vm =
         | Op_ret -> return_to_caller vm (reg frame instr.a)
         | Op_ret_void -> return_to_caller vm Value.Unit
         | Op_alloc_tuple ->
+            Heap.maybe_collect vm.heap;
             let fields =
               Array.map (fun r -> reg frame r) instr.extra
             in
             set_reg frame instr.a (Heap.alloc_tuple vm.heap fields)
         | Op_alloc_adt ->
+            Heap.maybe_collect vm.heap;
             let fields =
               Array.map (fun r -> reg frame r) instr.extra
             in
             set_reg frame instr.a
               (Heap.alloc_adt vm.heap instr.b fields)
         | Op_alloc_closure ->
+            Heap.maybe_collect vm.heap;
             let env = Array.map (fun r -> reg frame r) instr.extra in
             set_reg frame instr.a
               (Heap.alloc_closure vm.heap instr.b env)
@@ -329,6 +333,7 @@ let step vm =
             set_reg frame instr.a
               (Value.Int (get_tag vm (reg frame instr.b)))
         | Op_cons ->
+            Heap.maybe_collect vm.heap;
             (* Cons as ADT tag=1 fields=[h;t]; Nil is tag=0 *)
             let fields = [| reg frame instr.b; reg frame instr.c |] in
             set_reg frame instr.a (Heap.alloc_adt vm.heap 1 fields)

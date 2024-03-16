@@ -1,0 +1,8 @@
+type Color = Red | Green | Blue
+
+let pick c =
+  match c with
+  | Red -> 1
+  | Green -> 2
+
+let main = pick Blue

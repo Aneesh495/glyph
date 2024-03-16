@@ -54,19 +54,13 @@ let flip_spaces heap =
   heap.top <- 0
 
 let tospace_alloc heap cell =
-  if heap.top >= heap.capacity then grow heap;
-  (* During GC we allocate into what will become the new fromspace.
-     Cheney uses tospace as the destination; we keep [top] as the tospace
-     bump during collection by writing into [tospace] directly here. *)
   let loc = heap.top in
   if loc >= Array.length heap.tospace then (
     let new_cap = Array.length heap.tospace * 2 in
     let to' = Array.make new_cap None in
     Array.blit heap.tospace 0 to' 0 loc;
     heap.tospace <- to';
-    if Array.length heap.fromspace < new_cap then
-      heap.fromspace <- Array.make new_cap None;
-    heap.capacity <- new_cap);
+    if new_cap > heap.capacity then heap.capacity <- new_cap);
   heap.tospace.(loc) <- Some cell;
   heap.top <- loc + 1;
   loc
@@ -91,7 +85,9 @@ let maybe_collect heap =
   heap.allocs_since_gc <- heap.allocs_since_gc + 1;
   if heap.top >= heap.capacity - 1 then (
     match heap.collect with
-    | Some f -> f heap
+    | Some f ->
+        f heap;
+        if heap.top >= heap.capacity / 2 then grow heap
     | None -> grow heap)
 
 let raw_alloc heap kind =

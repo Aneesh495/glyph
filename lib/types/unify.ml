@@ -99,9 +99,9 @@ let unify_span ~span a b =
 let require_arrow t =
   match repr t with
   | TArrow (a, b) -> Ok (a, b)
-  | TVar ({ contents = Unbound _ } as r) ->
-      let a = fresh_var () in
-      let b = fresh_var () in
+  | TVar ({ contents = Unbound tv } as r) ->
+      let a = fresh_var_at tv.level in
+      let b = fresh_var_at tv.level in
       r := Link (TArrow (a, b));
       Ok (a, b)
   | _ -> err (Printf.sprintf "expected a function type, got %s" (to_string t))
@@ -109,8 +109,8 @@ let require_arrow t =
 let require_tuple ~arity t =
   match repr t with
   | TTuple ts when List.length ts = arity -> Ok ts
-  | TVar ({ contents = Unbound _ } as r) ->
-      let ts = List.init arity (fun _ -> fresh_var ()) in
+  | TVar ({ contents = Unbound tv } as r) ->
+      let ts = List.init arity (fun _ -> fresh_var_at tv.level) in
       r := Link (TTuple ts);
       Ok ts
   | _ ->
@@ -157,8 +157,8 @@ let project_field ~span record_ty name =
             (Error.Type_error
                (Error.make ~kind:Error.Unbound_field span
                   (Printf.sprintf "unbound record field %s" fname))))
-  | TVar ({ contents = Unbound _ } as r) ->
-      let field_ty = fresh_var () in
+  | TVar ({ contents = Unbound tv } as r) ->
+      let field_ty = fresh_var_at tv.level in
       r := Link (TRecord [ (fname, field_ty, false) ]);
       field_ty
   | _ ->

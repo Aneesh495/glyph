@@ -112,7 +112,7 @@ let ( @-> ) = arrow
 let forall1 name body =
   let a = fresh_var ~name () in
   match repr a with
-  | TVar { contents = Unbound tv } -> Forall ([ tv ], body a)
+  | TVar { contents = Unbound tv } -> quantify [ tv ] (body a)
   | _ -> mono (body a)
 
 let register_variant env ~type_name ~params ctors =
@@ -133,7 +133,7 @@ let register_variant env ~type_name ~params ctors =
       (fun (env, infos, tag) (cname, arg_builders) ->
         let args = List.map (fun f -> f param_tys) arg_builders in
         let ty = List.fold_right (fun a r -> a @-> r) args result in
-        let scheme = Forall (qs, ty) in
+        let scheme = quantify qs ty in
         let info =
           {
             name = Ident.Intern.intern cname;
@@ -168,50 +168,42 @@ let add_type_def env (td : Ast.type_def) =
         | _ -> None)
       param_tys
   in
-  let result =
-    apply_constructor (Ident.name td.td_name)
-      (List.map (fun _ -> fresh_var ()) params)
-  in
-  (* Rebuild result with the actual param vars. *)
   let result = apply_constructor (Ident.name td.td_name) param_tys in
+  let rec translate (ty : Ast.ty) : ty =
+    match ty.ty_desc with
+    | Ast.Ty_named (n, args) ->
+        if Ident.equal n td.td_name then
+          if args = [] then result
+          else apply_constructor (Ident.name n) (List.map translate args)
+        else (
+          match (String.lowercase_ascii (Ident.name n), args) with
+          | "int", [] -> t_int
+          | "float", [] -> t_float
+          | "bool", [] -> t_bool
+          | "string", [] -> t_string
+          | "char", [] -> t_char
+          | "unit", [] -> t_unit
+          | _, _ ->
+              apply_constructor (Ident.name n) (List.map translate args))
+    | Ast.Ty_var id -> (
+        match
+          List.find_opt
+            (fun (p, _) -> Ident.equal p id)
+            (List.combine params param_tys)
+        with
+        | Some (_, t) -> t
+        | None -> fresh_var ~name:(Ident.name id) ())
+    | Ast.Ty_unit -> t_unit
+    | Ast.Ty_hole -> fresh_var ()
+    | Ast.Ty_arrow (a, b) -> arrow (translate a) (translate b)
+    | Ast.Ty_tuple ts -> tuple (List.map translate ts)
+  in
   let env, ctor_infos, _ =
     List.fold_left
       (fun (env, infos, tag) (cd : Ast.ctor_decl) ->
-        (* Translate ctor args as fresh for now; Infer's translate is preferred
-           but Env is defined before full inference context. Treat args as opaque
-           type constructors by name when simple. *)
-        let arg_tys =
-          List.map
-            (fun (ty : Ast.ty) ->
-              match ty.ty_desc with
-              | Ast.Ty_named (n, args) -> (
-                  match (String.lowercase_ascii (Ident.name n), args) with
-                  | "int", [] -> t_int
-                  | "float", [] -> t_float
-                  | "bool", [] -> t_bool
-                  | "string", [] -> t_string
-                  | "char", [] -> t_char
-                  | "unit", [] -> t_unit
-                  | _, _ ->
-                      apply_constructor (Ident.name n)
-                        (List.map (fun _ -> fresh_var ()) args))
-              | Ast.Ty_var id -> (
-                  match
-                    List.find_opt
-                      (fun (p, _) -> Ident.equal p id)
-                      (List.combine params param_tys)
-                  with
-                  | Some (_, t) -> t
-                  | None -> fresh_var ~name:(Ident.name id) ())
-              | Ast.Ty_unit -> t_unit
-              | Ast.Ty_hole -> fresh_var ()
-              | Ast.Ty_arrow (_a, _b) -> fresh_var ()
-              | Ast.Ty_tuple ts ->
-                  tuple (List.map (fun _ -> fresh_var ()) ts))
-            cd.ctor_args
-        in
+        let arg_tys = List.map translate cd.ctor_args in
         let ty = List.fold_right (fun a r -> a @-> r) arg_tys result in
-        let scheme = Forall (qs, ty) in
+        let scheme = quantify qs ty in
         let info =
           {
             name = cd.ctor_name;

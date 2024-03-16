@@ -1,77 +1,67 @@
 (** Built-in native functions. *)
 
+let output_sink : (string -> unit) option ref = ref None
+let set_output_sink f = output_sink := f
+
+let emit_out s =
+  match !output_sink with
+  | Some f -> f s
+  | None ->
+      Stdlib.print_string s;
+      flush stdout
+
 let print_int = function
   | [ Value.Int i ] ->
-      Stdlib.print_int i;
-      Stdlib.print_newline ();
-      flush stdout;
+      emit_out (Stdlib.string_of_int i ^ "\n");
       Value.Unit
   | [ v ] ->
-      Stdlib.print_int (Value.as_int v);
-      Stdlib.print_newline ();
-      flush stdout;
+      emit_out (Stdlib.string_of_int (Value.as_int v) ^ "\n");
       Value.Unit
   | _ -> failwith "print_int: arity"
 
 let print_string = function
   | [ Value.String s ] ->
-      Stdlib.print_string s;
-      Stdlib.print_newline ();
-      flush stdout;
+      emit_out (s ^ "\n");
       Value.Unit
   | [ v ] ->
-      Stdlib.print_string (Value.to_string v);
-      Stdlib.print_newline ();
-      flush stdout;
+      emit_out (Value.to_string v ^ "\n");
       Value.Unit
   | _ -> failwith "print_string: arity"
 
 let print_bool = function
   | [ Value.Bool b ] ->
-      Stdlib.print_string (string_of_bool b);
-      Stdlib.print_newline ();
-      flush stdout;
+      emit_out (string_of_bool b ^ "\n");
       Value.Unit
   | [ v ] ->
-      Stdlib.print_string (string_of_bool (Value.as_bool v));
-      Stdlib.print_newline ();
-      flush stdout;
+      emit_out (string_of_bool (Value.as_bool v) ^ "\n");
       Value.Unit
   | _ -> failwith "print_bool: arity"
 
 let print_float = function
   | [ Value.Float f ] ->
-      Stdlib.print_float f;
-      Stdlib.print_newline ();
-      flush stdout;
+      emit_out (Stdlib.string_of_float f ^ "\n");
       Value.Unit
   | [ v ] ->
-      Stdlib.print_float (Value.as_float v);
-      Stdlib.print_newline ();
-      flush stdout;
+      emit_out (Stdlib.string_of_float (Value.as_float v) ^ "\n");
       Value.Unit
   | _ -> failwith "print_float: arity"
 
 let print_char = function
   | [ Value.Int i ] ->
-      Stdlib.print_char (Char.chr i);
-      flush stdout;
+      emit_out (String.make 1 (Char.chr i));
       Value.Unit
   | [ v ] ->
-      Stdlib.print_char (Char.chr (Value.as_int v));
-      flush stdout;
+      emit_out (String.make 1 (Char.chr (Value.as_int v)));
       Value.Unit
   | _ -> failwith "print_char: arity"
 
 let print_any = function
   | [ v ] ->
-      Stdlib.print_endline (Value.to_string v);
-      flush stdout;
+      emit_out (Value.to_string v ^ "\n");
       Value.Unit
   | vs ->
-      List.iter (fun v -> Stdlib.print_string (Value.to_string v)) vs;
-      Stdlib.print_newline ();
-      flush stdout;
+      List.iter (fun v -> emit_out (Value.to_string v)) vs;
+      emit_out "\n";
       Value.Unit
 
 let string_of_int = function

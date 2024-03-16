@@ -275,9 +275,7 @@ let parse_int64 t ~start lexeme =
     0L
 
 let read_hex_number t ~start =
-  (* caller already consumed leading 0 and saw x/X *)
-  advance t;
-  (* x/X *)
+  advance_n t 2;
   let digits = read_while t is_hex_digit in
   if digits = "" then
     report t (span_from t start) "expected hex digits after 0x";
@@ -348,7 +346,7 @@ let read_operator t =
   let two =
     match (peek_char t, peek_char_n t 1) with
     | Some '=', Some '=' -> Some (Token.Binop Token.Op_eq, 2)
-    | Some '!', Some '=' -> Some (Token.Binop Token.Op_neq, 2)
+    | Some '!', Some '=' | Some '<', Some '>' -> Some (Token.Binop Token.Op_neq, 2)
     | Some '<', Some '=' -> Some (Token.Binop Token.Op_le, 2)
     | Some '>', Some '=' -> Some (Token.Binop Token.Op_ge, 2)
     | Some '&', Some '&' -> Some (Token.Binop Token.Op_and, 2)

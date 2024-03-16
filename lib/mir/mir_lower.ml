@@ -181,6 +181,27 @@ let lower_atom ctx fn_ctx lbl = function
                       (Printf.sprintf "Mir_lower: unbound variable '%s' in function '%s'"
                          s (Ident.name fn_ctx.fn_name)))))
 
+let emit_match_failure ctx fn_ctx lbl =
+  let msg_v = fresh_vreg fn_ctx in
+  let _ = intern_string ctx "match failure" in
+  emit fn_ctx lbl (IConst (msg_v, CString "match failure"));
+  let abort_id = Ident.Intern.intern "abort" in
+  let g_idx = intern_global ctx abort_id in
+  let abort_v = fresh_vreg fn_ctx in
+  emit fn_ctx lbl (ILoadGlobal (abort_v, g_idx));
+  let dummy_dst = fresh_vreg fn_ctx in
+  emit fn_ctx lbl (ICallClosure (dummy_dst, abort_v, [ msg_v ]));
+  set_term fn_ctx lbl (THalt None)
+
+let emit_raise ctx fn_ctx lbl v =
+  let abort_id = Ident.Intern.intern "abort" in
+  let g_idx = intern_global ctx abort_id in
+  let abort_v = fresh_vreg fn_ctx in
+  emit fn_ctx lbl (ILoadGlobal (abort_v, g_idx));
+  let dummy_dst = fresh_vreg fn_ctx in
+  emit fn_ctx lbl (ICallClosure (dummy_dst, abort_v, [ v ]));
+  set_term fn_ctx lbl (THalt None)
+
 let rec lower_expr ctx fn_ctx lbl (e : Hir.expr) : vreg * label =
   match e with
   | Hir.Atom (a, _sp) ->
@@ -280,14 +301,14 @@ let rec lower_expr ctx fn_ctx lbl (e : Hir.expr) : vreg * label =
       lower_switch_lit ctx fn_ctx lbl vs cases default_opt sp
 
   | Hir.Raise (a, _sp) ->
-      let _v = lower_atom ctx fn_ctx lbl a in
-      set_term fn_ctx lbl (THalt None);
+      let v = lower_atom ctx fn_ctx lbl a in
+      emit_raise ctx fn_ctx lbl v;
       let l_unreach = new_block fn_ctx () in
       let dst = fresh_vreg fn_ctx in
       (dst, l_unreach.label)
 
   | Hir.Fail_match _sp ->
-      set_term fn_ctx lbl (THalt None);
+      emit_match_failure ctx fn_ctx lbl;
       let l_unreach = new_block fn_ctx () in
       let dst = fresh_vreg fn_ctx in
       (dst, l_unreach.label)
@@ -380,8 +401,12 @@ and lower_tail ctx fn_ctx lbl (e : Hir.expr) : unit =
       let vs = lower_atom ctx fn_ctx lbl scrut in
       lower_switch_lit_tail ctx fn_ctx lbl vs cases default_opt sp
 
-  | Hir.Fail_match _ | Hir.Raise _ ->
-      set_term fn_ctx lbl (THalt None)
+  | Hir.Fail_match _ ->
+      emit_match_failure ctx fn_ctx lbl
+
+  | Hir.Raise (a, _sp) ->
+      let v = lower_atom ctx fn_ctx lbl a in
+      emit_raise ctx fn_ctx lbl v
 
   | other ->
       let v, lbl' = lower_expr ctx fn_ctx lbl other in
@@ -417,7 +442,7 @@ and lower_switch_ctor ctx fn_ctx lbl vs cases default_opt sp : vreg * label =
         set_term fn_ctx l_def_end (TJump l_join.label);
         incoming := (l_def_end, v_def) :: !incoming)
   | None ->
-      set_term fn_ctx l_default.label (THalt None));
+      emit_match_failure ctx fn_ctx l_default.label);
   set_term fn_ctx lbl (TSwitch (vs, case_tags_labels, l_default.label));
   add_phi fn_ctx l_join.label dst (List.rev !incoming);
   (dst, l_join.label)
@@ -440,7 +465,7 @@ and lower_switch_ctor_tail ctx fn_ctx lbl vs cases default_opt _sp : unit =
   in
   (match default_opt with
   | Some def -> lower_tail ctx fn_ctx l_default.label def
-  | None -> set_term fn_ctx l_default.label (THalt None));
+  | None -> emit_match_failure ctx fn_ctx l_default.label);
   set_term fn_ctx lbl (TSwitch (vs, case_tags_labels, l_default.label))
 
 and lower_switch_lit ctx fn_ctx lbl vs cases default_opt sp : vreg * label =
@@ -469,7 +494,7 @@ and lower_switch_lit ctx fn_ctx lbl vs cases default_opt sp : vreg * label =
           set_term fn_ctx l_def_end (TJump l_join.label);
           incoming := (l_def_end, v_def) :: !incoming)
     | None ->
-        set_term fn_ctx l_default.label (THalt None));
+        emit_match_failure ctx fn_ctx l_default.label);
     set_term fn_ctx lbl (TSwitch (vs, case_tags_labels, l_default.label));
     add_phi fn_ctx l_join.label dst (List.rev !incoming);
     (dst, l_join.label))
@@ -492,7 +517,7 @@ and lower_switch_lit_tail ctx fn_ctx lbl vs cases default_opt _sp : unit =
     in
     (match default_opt with
     | Some def -> lower_tail ctx fn_ctx l_default.label def
-    | None -> set_term fn_ctx l_default.label (THalt None));
+    | None -> emit_match_failure ctx fn_ctx l_default.label);
     set_term fn_ctx lbl (TSwitch (vs, case_tags_labels, l_default.label)))
   else
     let v, lbl' = lower_lit_cascade ctx fn_ctx lbl vs cases default_opt _sp in
@@ -504,7 +529,7 @@ and lower_lit_cascade ctx fn_ctx lbl vs cases default_opt sp : vreg * label =
       match default_opt with
       | Some def -> lower_expr ctx fn_ctx lbl def
       | None ->
-          set_term fn_ctx lbl (THalt None);
+          emit_match_failure ctx fn_ctx lbl;
           let l_unreach = new_block fn_ctx () in
           (fresh_vreg fn_ctx, l_unreach.label))
   | (lit, body) :: rest ->

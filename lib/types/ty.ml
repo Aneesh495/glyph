@@ -185,27 +185,54 @@ let generalize t =
   let body = generalize_ty (zonk t) in
   Forall (collect_generics body, body)
 
-let instantiate (Forall (qs, body)) =
-  let subst_map =
-    List.fold_left
-      (fun m tv ->
-        let fresh =
-          match tv.namehint with
-          | Some n -> fresh_var ~name:n ()
-          | None -> fresh_var ()
-        in
-        (tv.id, fresh) :: m)
-      [] qs
-  in
+let quantify qs body =
+  let qset = List.fold_left (fun s tv -> Tv_set.add tv s) Tv_set.empty qs in
   let rec go t =
     match repr t with
-    | TVar { contents = Generic tv } -> (
-        match List.assoc_opt tv.id subst_map with
-        | Some t' -> t'
-        | None ->
-            (* Shouldn't happen for well-formed schemes; leave as-is. *)
-            TVar (ref (Generic tv)))
+    | TVar ({ contents = Unbound tv } as r) when Tv_set.mem tv qset ->
+        let r' = ref (Generic tv) in
+        r := Link (TVar r');
+        TVar r'
     | TVar _ as v -> v
+    | TCon _ as c -> c
+    | TApp (a, b) -> TApp (go a, go b)
+    | TArrow (a, b) -> TArrow (go a, go b)
+    | TTuple ts -> TTuple (List.map go ts)
+    | TUnit | TInt | TFloat | TBool | TString | TChar as p -> p
+    | TArray t -> TArray (go t)
+    | TRef t -> TRef (go t)
+    | TRecord fields ->
+        TRecord (List.map (fun (n, ty, mut) -> (n, go ty, mut)) fields)
+  in
+  let body' = go (zonk body) in
+  Forall (qs, body')
+
+let instantiate (Forall (qs, body)) =
+  match qs with
+  | [] -> body
+  | _ ->
+      let subst_map =
+        List.fold_left
+          (fun m tv ->
+            let fresh =
+              match tv.namehint with
+              | Some n -> fresh_var ~name:n ()
+              | None -> fresh_var ()
+            in
+            (tv.id, fresh) :: m)
+          [] qs
+      in
+      let rec go t =
+        match repr t with
+        | TVar ({ contents = Generic tv } as r) -> (
+            match List.assoc_opt tv.id subst_map with
+            | Some t' -> t'
+            | None -> TVar r)
+        | TVar ({ contents = Unbound tv } as r) -> (
+            match List.assoc_opt tv.id subst_map with
+            | Some t' -> t'
+            | None -> TVar r)
+        | TVar _ as v -> v
     | TCon _ as c -> c
     | TApp (a, b) -> TApp (go a, go b)
     | TArrow (a, b) -> TArrow (go a, go b)

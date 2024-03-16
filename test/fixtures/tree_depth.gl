@@ -1,0 +1,13 @@
+type Tree = Leaf Int | Node Tree Tree
+
+let rec depth t =
+  match t with
+  | Leaf _ -> 1
+  | Node l r ->
+      let dl = depth l in
+      let dr = depth r in
+      if dl > dr then dl + 1 else dr + 1
+
+let tree = Node (Node (Leaf 1) (Leaf 2)) (Node (Leaf 3) (Node (Leaf 4) (Leaf 5)))
+
+let main = print_int (depth tree)

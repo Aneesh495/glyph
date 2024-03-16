@@ -20,4 +20,5 @@ and a semi-space copying GC.")
   (dune (>= 3.14))
   cmdliner
   (alcotest :with-test)
-  (qcheck :with-test)))
+  (qcheck :with-test)
+  (qcheck-alcotest :with-test)))

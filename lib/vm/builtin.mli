@@ -15,3 +15,4 @@ val abort : Value.t list -> Value.t
 val lookup : string -> Value.native option
 val register : string -> Value.native -> unit
 val all : unit -> (string * Value.native) list
+val set_output_sink : (string -> unit) option -> unit
