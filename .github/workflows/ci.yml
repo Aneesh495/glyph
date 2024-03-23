@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+    name: Build & Test Glyph Pipeline
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup OCaml
+        uses: ocaml/setup-ocaml@v3
+        with:
+          ocaml-compiler: 5.2.x
+          dune-cache: true
+
+      - name: Install dependencies
+        run: |
+          opam install -y dune cmdliner alcotest qcheck qcheck-alcotest
+
+      - name: Build all targets
+        run: opam exec -- dune build @all
+
+      - name: Run test suite
+        run: opam exec -- dune runtest
+
+      - name: Run verification script
+        run: bash scripts/verify.sh
