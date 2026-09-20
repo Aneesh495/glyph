@@ -25,11 +25,11 @@ Each call pushes a **frame**:
 ```text
 ┌─────────────────────────────────────────────┐
 │ Frame                                       │
-│  return_pc     — IP to resume in caller     │
-│  func_id       — which function metadata    │
-│  regs[0‥N)     — locals / virtual registers │
-│  closure_env   — captured values (or null)  │
-│  caller_frame  — previous frame link        │
+│  return_pc     , IP to resume in caller     │
+│  func_id       , which function metadata    │
+│  regs[0‥N)     , locals / virtual registers │
+│  closure_env   , captured values (or null)  │
+│  caller_frame  , previous frame link        │
 └─────────────────────────────────────────────┘
 ```
 
@@ -65,7 +65,7 @@ Calling convention:
 | `Int` | integer | no |
 | `Float` | float | no (or boxed if needed) |
 | `Bool` | bool | no |
-| `Unit` | — | no |
+| `Unit` | , | no |
 | `String` | bytes | yes |
 | `Tuple` | field vector | yes |
 | `Adt` | tag + fields | yes |
@@ -84,7 +84,7 @@ typically register indices (`rA`, `rB`, `rC`), immediate const-pool indices
 
 | Opcode | Operands | Effect |
 |--------|----------|--------|
-| `NOP` | — | GC safepoint / padding |
+| `NOP` | , | GC safepoint / padding |
 | `MOVE` | rA rB | `regs[A] ← regs[B]` |
 | `LOAD_INT` | rA k | `regs[A] ← Int(consts[k])` or immediate |
 | `LOAD_FLOAT` | rA k | float from pool |
@@ -112,7 +112,7 @@ typically register indices (`rA`, `rB`, `rC`), immediate const-pool indices
 | `JMP_IF` | rA L | jump if `regs[A]` true |
 | `JMP_IF_NOT` | rA L | jump if false |
 | `SWITCH_TAG` | rA table… | jump by ADT tag (or dense jump table) |
-| `HALT` | — | stop interpreter |
+| `HALT` | , | stop interpreter |
 
 ### Calls and returns
 
@@ -205,7 +205,7 @@ flowchart LR
 ### Walkthrough
 
 **Roots:** all registers in every frame, global slots, and the value currently
-being assembled for a call — anything the mutator can reach.
+being assembled for a call, anything the mutator can reach.
 
 **Copy an object `p`:**
 
@@ -259,15 +259,15 @@ between them. Registers point at `Cons` and the closure.
 2. Copy `Cons` → tospace `@T0`; leave forward at old address.
 3. Copy closure → `@T1`.
 4. Scan `@T0`: field `head` is an int (unchanged); field `tail` is `Nil`
-   immediate or another pointer — copy if heap.
+   immediate or another pointer, copy if heap.
 5. Scan `@T1`: update captured env pointers the same way.
-6. Dead tuple is never copied — reclaimed implicitly.
+6. Dead tuple is never copied, reclaimed implicitly.
 
 ### Safepoints
 
 `NOP` (or explicit `GC_CHECK`) at call sites / loop backs lets the compiler
 ensure all live pointers are in roots (no pointers only in physical machine
-regs outside the frame — easy in a pure interpreter).
+regs outside the frame, easy in a pure interpreter).
 
 ### Tradeoffs
 
@@ -295,6 +295,6 @@ fun main arity=0 locals=4 entry=0
 
 ## Related
 
-- [ir.md](ir.md) — how φ become moves before emit
-- [optimizations.md](optimizations.md) — fewer ops reach the VM
-- [contributing.md](contributing.md) — running examples under the VM
+- [ir.md](ir.md), how φ become moves before emit
+- [optimizations.md](optimizations.md), fewer ops reach the VM
+- [contributing.md](contributing.md), running examples under the VM
