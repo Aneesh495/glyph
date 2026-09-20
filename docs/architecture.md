@@ -1,11 +1,11 @@
 # Architecture
 
-Glyph is a multi-pass compiler that turns a strict functional language into
-register-based bytecode and runs it on a small VM with a copying GC. Every
-stage is a real IR transformation you can dump and step through, no black-box
-“backend.”
+The working CLI currently parses and typechecks source. The HIR, MIR/SSA,
+optimization, bytecode, and VM modules live under `research/` and are still
+being wired into a runnable pipeline. The stages below describe that design,
+not commands that already work end to end.
 
-This document walks the pipeline end-to-end: what each package owns, what
+This document walks the intended pipeline: what each package owns, what
 flows between passes, and why the seams look the way they do.
 
 Companion diagrams: [diagrams/pipeline.md](diagrams/pipeline.md),
@@ -32,9 +32,8 @@ flowchart LR
   BC --> VM[Interpreter + GC]
 ```
 
-CLI entry points (`glyph run`, `compile`, `typecheck`, `dump-mir`, `disasm`)
-all share `glyph_driver`’s orchestration; they just stop at different stages
-or feed different sinks.
+The current CLI exposes `parse`, `typecheck`, and `run`. `run` currently stops
+after typechecking. `compile`, `dump-mir`, and `disasm` are proposed commands.
 
 ## Package map
 
@@ -43,12 +42,12 @@ or feed different sinks.
 | `glyph_util` | `lib/util` | Spans, diagnostics, idents, union-find, graphs, bitvecs, worklists |
 | `glyph_syntax` | `lib/syntax` | Tokens, lexer, AST, Pratt/RD parser, pretty-printer |
 | `glyph_types` | `lib/types` | Type AST, env, unification, Algorithm W, error formatting |
-| `glyph_hir` | `lib/hir` | High-level IR, desugaring, pattern → decision trees |
-| `glyph_mir` | `lib/mir` | CFG MIR, dominators, Cytron SSA, HIR lowering |
-| `glyph_opt` | `lib/opt` | Pass manager + const/copy/SCCP/DCE/CSE/inline/simplify |
-| `glyph_codegen` | `lib/codegen` | Opcode ISA, chunks, emit, disassembler |
-| `glyph_vm` | `lib/vm` | Values, heap, Cheney GC, builtins, interpreter |
-| `glyph_driver` | `lib/driver` | Wire the stages; CLI-facing compile API |
+| `glyph_hir` research modules | `research/hir` | High-level IR, desugaring, pattern → decision trees |
+| `glyph_mir` research modules | `research/mir` | CFG MIR and SSA work |
+| `glyph_opt` research modules | `research/opt` | Optimization passes and pass manager |
+| `glyph_codegen` research modules | `research/codegen` | Opcode ISA, chunks, emit, disassembler |
+| `glyph_vm` research modules | `research/vm` | Values, heap, GC, builtins, interpreter |
+| Driver research modules | `research/driver` | Intended stage orchestration |
 
 Dependency direction is strictly forward:
 
@@ -284,10 +283,9 @@ compile file =
   chunk
 ```
 
-`run` = compile then `Interp.exec chunk`.  
-`typecheck` stops after infer.  
-`dump-mir` stops after SSA (or after opts with a flag).  
-`disasm` loads a `.gbc` and prints opcodes.
+The pseudocode above describes the intended driver. The current `run` command
+stops after inference and does not call `Interp.exec`. `typecheck` also stops
+after inference. `dump-mir` and `disasm` are not exposed by the CLI yet.
 
 ## Related docs
 
